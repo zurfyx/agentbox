@@ -12,5 +12,9 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git ripgrep less ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+# Claude Code refuses --dangerously-skip-permissions as root, so run as the
+# non-root "node" user (uid 1000) that ships with the base image. Its config
+# lives at /home/node/.claude, which we mount from the host.
+USER node
 WORKDIR /workspace
 ENTRYPOINT ["claude"]

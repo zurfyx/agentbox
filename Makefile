@@ -15,10 +15,10 @@ install: ## Add the shell function to ~/.zshrc
 
 run: build ## Build then run Claude in the current directory
 	mkdir -p $(HOME_DIR)
-	docker run --rm -it -v $(HOME_DIR):/root/.claude -v $(PWD):/workspace -w /workspace $(IMAGE) --dangerously-skip-permissions
+	docker run --rm -it -v $(HOME_DIR):/home/node -v $(PWD):/workspace -w /workspace $(IMAGE) --dangerously-skip-permissions
 
 shell: ## Open a bash shell inside the image (debug)
-	docker run --rm -it --entrypoint bash -v $(HOME_DIR):/root/.claude -v $(PWD):/workspace -w /workspace $(IMAGE)
+	docker run --rm -it --entrypoint bash -v $(HOME_DIR):/home/node -v $(PWD):/workspace -w /workspace $(IMAGE)
 
 clean: ## Remove the image (login/config in $(HOME_DIR) is kept)
 	-docker rmi $(IMAGE)
