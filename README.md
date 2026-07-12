@@ -49,6 +49,32 @@ Override via env vars before sourcing, or in your shell:
 Pin a Claude Code version: `make build VERSION=1.2.3`.
 Upgrade to latest: `make rebuild`.
 
+## Git / GitHub inside the container
+
+A Linux container can't run the macOS `gh` binary or read the keychain, so git
+auth is handled at launch instead:
+
+- `my-clauded` injects the host's live token (`gh auth token`) as `GH_TOKEN`.
+- The image ships a tiny credential helper (`git-credential-ghtoken`) that feeds
+  that token to git over HTTPS, plus `safe.directory=*` so bind-mounted repos
+  (owned by your macOS uid, not the container's) don't trip "dubious ownership".
+- `install.sh` mirrors your host git `user.name` / `user.email` so commits are
+  attributed correctly.
+
+Net result: `git pull` / `git push` / `gh`-authenticated fetches just work, with
+no keychain, no 1Password prompt, and no token stored on disk — and it always
+uses your current `gh` session, so it never goes stale.
+
+Use a different credential (e.g. a scoped classic PAT) by exporting it first:
+
+```sh
+GH_TOKEN=ghp_yourclassicPAT my-clauded
+```
+
+Only HTTPS remotes work (`https://github.com/...`), not SSH — the container has
+no access to your SSH agent. Convert a repo with:
+`git remote set-url origin https://github.com/<owner>/<repo>.git`.
+
 ## Status line
 
 `make install` also provisions `statusline.sh` (model · dir · git branch ·

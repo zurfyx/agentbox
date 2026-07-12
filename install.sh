@@ -26,8 +26,22 @@ fi
 } >> "$RC"
 
 # Provision the personal config dir (login lives here; survives image rebuilds).
-CONFIG_HOME="${MY_CLAUDED_HOME:-$HOME/.claude-personal}/.claude"
+PERSONAL_HOME="${MY_CLAUDED_HOME:-$HOME/.claude-personal}"
+CONFIG_HOME="$PERSONAL_HOME/.claude"
 mkdir -p "$CONFIG_HOME"
+
+# Mirror the host git identity so commits made inside the container are attributed
+# correctly. (Credential auth + safe.directory are baked into the image; the token
+# itself is injected at launch by my-clauded.sh.)
+GIT_NAME="$(git config --global user.name 2>/dev/null || true)"
+GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+if [ -n "$GIT_EMAIL" ]; then
+  cat > "$PERSONAL_HOME/.gitconfig" <<EOF
+[user]
+	name = $GIT_NAME
+	email = $GIT_EMAIL
+EOF
+fi
 
 # Status line: copy the script and register it in settings.json (merge, don't clobber).
 install -m 0755 "$SCRIPT_DIR/statusline.sh" "$CONFIG_HOME/statusline.sh"

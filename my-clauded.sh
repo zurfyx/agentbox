@@ -21,12 +21,17 @@
 
 my-clauded() {
   mkdir -p "$MY_CLAUDED_HOME"
+  # GitHub auth for git inside the container: the Linux container can't run the
+  # Mac `gh` binary or read the keychain, so hand it the live token at launch.
+  # Override by exporting GH_TOKEN (e.g. a scoped classic PAT) before running.
+  local gh_token="${GH_TOKEN:-$(command -v gh >/dev/null 2>&1 && gh auth token 2>/dev/null)}"
   docker run --rm -it \
     -v "$MY_CLAUDED_HOME:/home/node" \
     -v /Users:/Users \
     -v /Volumes:/Volumes \
     -v /tmp:/tmp \
     -w "$PWD" \
+    -e GH_TOKEN="$gh_token" \
     "$MY_CLAUDED_IMAGE" \
     --dangerously-skip-permissions "$@"
 }
