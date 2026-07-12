@@ -31,7 +31,13 @@ elif [ "$PCT" -ge 70 ]; then C='\033[33m'
 else C='\033[32m'; fi
 DIM='\033[2m'; R='\033[0m'
 
-FILLED=$((PCT / 10)); EMPTY=$((10 - FILLED))
-BAR=$(printf "%${FILLED}s" | tr ' ' '█')$(printf "%${EMPTY}s" | tr ' ' '░')
+# Build the bar by concatenating the multibyte glyphs directly. Do NOT use
+# `tr ' ' '█'` — GNU tr (Linux) is byte-oriented and mangles the 3-byte
+# block characters into invalid UTF-8 (renders as ??? diamonds).
+[ -z "$PCT" ] && PCT=0
+FILLED=$((PCT / 10)); [ "$FILLED" -gt 10 ] && FILLED=10; EMPTY=$((10 - FILLED))
+BAR=""
+for ((i = 0; i < FILLED; i++)); do BAR="${BAR}█"; done
+for ((i = 0; i < EMPTY; i++)); do BAR="${BAR}░"; done
 
 echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}% | ${COST} | ${DIM}+${ADDED}/-${REMOVED}${R} | ${MINS}m${SECS}s"
