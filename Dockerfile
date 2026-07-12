@@ -9,7 +9,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
 
 # A few niceties Claude Code commonly shells out to.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ripgrep less ca-certificates \
+  && apt-get install -y --no-install-recommends git ripgrep less ca-certificates jq \
   && rm -rf /var/lib/apt/lists/*
 
 # Claude Code refuses --dangerously-skip-permissions as root, so run as the

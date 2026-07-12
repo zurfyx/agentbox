@@ -49,6 +49,13 @@ Override via env vars before sourcing, or in your shell:
 Pin a Claude Code version: `make build VERSION=1.2.3`.
 Upgrade to latest: `make rebuild`.
 
+## Status line
+
+`make install` also provisions `statusline.sh` (model · dir · git branch ·
+context-usage bar · cost · lines changed · elapsed) into the personal config and
+registers it in `settings.json`. The image ships `jq` + `git`, which it needs.
+Edit `statusline.sh` and re-run `make install` to update it.
+
 ## Make targets
 
 ```
