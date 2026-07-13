@@ -19,6 +19,12 @@ if grep -qF "$MARKER" "$RC"; then
   mv "$tmp" "$RC"
 fi
 
+# Ensure the rc ends in a newline so the marker doesn't glue onto the last line
+# (a hand-edited ~/.zshrc without a trailing newline would otherwise corrupt).
+if [ -s "$RC" ] && [ "$(tail -c1 "$RC")" != "" ]; then
+  printf '\n' >> "$RC"
+fi
+
 {
   echo "$MARKER"
   echo "source \"$SCRIPT_DIR/my-clauded.sh\""
@@ -36,11 +42,12 @@ mkdir -p "$CONFIG_HOME"
 GIT_NAME="$(git config --global user.name 2>/dev/null || true)"
 GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
 if [ -n "$GIT_EMAIL" ]; then
-  cat > "$PERSONAL_HOME/.gitconfig" <<EOF
-[user]
-	name = $GIT_NAME
-	email = $GIT_EMAIL
-EOF
+  # `git config --file` MERGES (never clobbers a customized personal .gitconfig).
+  [ -n "$GIT_NAME" ] && git config --file "$PERSONAL_HOME/.gitconfig" user.name "$GIT_NAME"
+  git config --file "$PERSONAL_HOME/.gitconfig" user.email "$GIT_EMAIL"
+else
+  echo "Note: host git identity not set — container commits will need an identity." >&2
+  echo "  Set it on the host: git config --global user.name '...'; git config --global user.email '...'" >&2
 fi
 
 # Status line: copy the script and register it in settings.json (merge, don't clobber).

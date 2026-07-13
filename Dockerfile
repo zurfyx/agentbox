@@ -9,7 +9,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
 
 # A few niceties Claude Code commonly shells out to.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ripgrep less ca-certificates jq \
+  && apt-get install -y --no-install-recommends git ripgrep less ca-certificates jq openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
 # Git inside the container: (1) trust bind-mounted repos even though the host
@@ -19,6 +19,11 @@ COPY git-credential-ghtoken /usr/local/bin/git-credential-ghtoken
 RUN chmod +x /usr/local/bin/git-credential-ghtoken \
   && git config --system --add safe.directory '*' \
   && git config --system credential.helper ghtoken
+
+# Bridge for running macOS-host-only steps (real-Claude smoke test, Darwin pty
+# tests) from inside the container. See onhost + setup-host-bridge.sh + README.
+COPY onhost /usr/local/bin/onhost
+RUN chmod +x /usr/local/bin/onhost
 
 # Claude Code refuses --dangerously-skip-permissions as root, so run as the
 # non-root "node" user (uid 1000) that ships with the base image. Its config

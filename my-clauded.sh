@@ -25,13 +25,24 @@ my-clauded() {
   # Mac `gh` binary or read the keychain, so hand it the live token at launch.
   # Override by exporting GH_TOKEN (e.g. a scoped classic PAT) before running.
   local gh_token="${GH_TOKEN:-$(command -v gh >/dev/null 2>&1 && gh auth token 2>/dev/null)}"
-  docker run --rm -it \
+  [ -z "$gh_token" ] && echo "my-clauded: no GH_TOKEN (gh missing or logged out) — private-repo git will fail" >&2
+  # Warn if launched from a dir that isn't mounted into the container (it would
+  # appear as an empty, root-owned workdir).
+  case "$PWD" in
+    /Users|/Users/*|/Volumes|/Volumes/*|/tmp|/tmp/*) ;;
+    *) echo "my-clauded: warning: $PWD is not under /Users, /Volumes, or /tmp — it won't be visible in the container" >&2 ;;
+  esac
+  # Pass the token by NAME (not -e KEY=value) so it's read from docker's
+  # environment and never appears in the docker-run argv (visible via `ps`).
+  GH_TOKEN="$gh_token" docker run --rm -it \
     -v "$MY_CLAUDED_HOME:/home/node" \
     -v /Users:/Users \
     -v /Volumes:/Volumes \
     -v /tmp:/tmp \
     -w "$PWD" \
-    -e GH_TOKEN="$gh_token" \
+    -e GH_TOKEN \
+    -e CLAUDED_HOST="${CLAUDED_HOST:-host.docker.internal}" \
+    -e CLAUDED_HOST_USER="${CLAUDED_HOST_USER:-$USER}" \
     "$MY_CLAUDED_IMAGE" \
     --dangerously-skip-permissions "$@"
 }
