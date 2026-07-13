@@ -122,9 +122,34 @@ the target with `AGENTBOX_HOST` / `AGENTBOX_HOST_USER`.
 ## Status line (Claude)
 
 `make install` provisions `statusline.sh` (model · dir · git branch · context bar ·
-cost · lines changed · elapsed) into Claude's config and registers it in
+**quota** · cost · lines changed · elapsed) into Claude's config and registers it in
 `settings.json`. The image ships `jq` + `git`, which it needs. Codex has its own
-TUI and ignores this. Edit `statusline.sh` and re-run `make install` to update it.
+TUI and ignores this.
+
+```
+[Opus 4.8] agentbox |  main | █░░░░░░░░░ 11% | 71% 3h  85% 3d | $1.81 | +0/-0 | 13m35s
+                              └ context used   └ quota left, and when it resets:
+                                                 71% of the 5h session (resets in 3h)
+                                                 85% of the 7d week    (resets in 3d)
+```
+
+The quota figures come from `.rate_limits` on the JSON that Claude Code pipes to
+the script on stdin — the same numbers `/usage` reports, not an estimate. Two
+things about that payload are easy to get wrong:
+
+- the API reports quota **consumed** (`used_percentage`); the script displays what's
+  **left** (`100 - used`), so it reads naturally next to the time remaining.
+- `resets_at` is a **unix epoch in seconds**, not an ISO string (Claude Code has a
+  separate code path that emits ISO — don't copy that one). The script handles
+  both shapes anyway.
+
+Claude Code only sends `.rate_limits` on subscription auth (Max/Pro). On an API
+key the whole segment self-hides, so the script is safe to use either way.
+
+**Editing it:** `install.sh` copies this repo's `statusline.sh` over
+`~/.claude/statusline.sh` **unconditionally** on every install, so edits made
+directly to `~/.claude/statusline.sh` are silently reverted on the next `make
+install` / rebuild. Edit `statusline.sh` *here*, then re-run `make install`.
 
 ## Make targets
 
