@@ -8,24 +8,23 @@
 #
 # Why: a Linux container can't exec macOS-only binaries or reproduce Darwin
 # kernel/pty behavior. This hops to the host over SSH so the container can drive
-# host-only steps (real-Claude smoke test, pty tests) without you switching
-# terminals.
+# host-only steps (smoke tests, pty tests) without you switching terminals.
 #
 # Requires: Remote Login enabled on the Mac + the dedicated key installed by
-# setup-host-bridge.sh. Host/user are injected by my-clauded.sh via
-# CLAUDED_HOST / CLAUDED_HOST_USER (defaults: host.docker.internal / the Mac user).
+# setup-host-bridge.sh. Host/user are injected by the launcher via
+# AGENTBOX_HOST / AGENTBOX_HOST_USER (defaults: host.docker.internal / Mac user).
 set -eu
 
-KEY="$HOME/.ssh/id_clauded_host"
-HOST="${CLAUDED_HOST:-host.docker.internal}"
-HOST_USER="${CLAUDED_HOST_USER:-}"
+KEY="$HOME/.ssh/id_agentbox_host"
+HOST="${AGENTBOX_HOST:-host.docker.internal}"
+HOST_USER="${AGENTBOX_HOST_USER:-}"
 
 if [ ! -f "$KEY" ]; then
   echo "onhost: missing key $KEY — run setup-host-bridge.sh on the Mac first" >&2
   exit 1
 fi
 if [ -z "$HOST_USER" ]; then
-  echo "onhost: CLAUDED_HOST_USER is not set (my-clauded.sh injects it; or export it)" >&2
+  echo "onhost: AGENTBOX_HOST_USER is not set (the launcher injects it; or export it)" >&2
   exit 1
 fi
 

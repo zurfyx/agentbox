@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Wire my-clauded into the shell by sourcing my-clauded.sh from ~/.zshrc.
-# Idempotent: re-running just refreshes the managed block.
+# Wire the agentbox launchers (my-clauded / my-codexd) into the shell by sourcing
+# agentbox.sh from ~/.zshrc. Idempotent: re-running just refreshes the block.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RC="${ZDOTDIR:-$HOME}/.zshrc"
-MARKER="# >>> clauded (my-clauded) >>>"
-END="# <<< clauded (my-clauded) <<<"
+MARKER="# >>> agentbox >>>"
+END="# <<< agentbox <<<"
 
 touch "$RC"
 
-# Drop any previous managed block so the install is idempotent.
-if grep -qF "$MARKER" "$RC"; then
-  tmp="$(mktemp)"
-  awk -v s="$MARKER" -v e="$END" '
-    $0==s{skip=1} !skip{print} $0==e{skip=0}
-  ' "$RC" > "$tmp"
-  mv "$tmp" "$RC"
-fi
+# Drop any previous managed block (current + the legacy "clauded" name) so the
+# install is idempotent and migrates cleanly.
+strip_block() {
+  local s="$1" e="$2" tmp
+  if grep -qF "$s" "$RC"; then
+    tmp="$(mktemp)"
+    awk -v s="$s" -v e="$e" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$RC" > "$tmp"
+    mv "$tmp" "$RC"
+  fi
+}
+strip_block "$MARKER" "$END"
+strip_block "# >>> clauded (my-clauded) >>>" "# <<< clauded (my-clauded) <<<"
 
 # Ensure the rc ends in a newline so the marker doesn't glue onto the last line
 # (a hand-edited ~/.zshrc without a trailing newline would otherwise corrupt).
@@ -27,18 +31,18 @@ fi
 
 {
   echo "$MARKER"
-  echo "source \"$SCRIPT_DIR/my-clauded.sh\""
+  echo "source \"$SCRIPT_DIR/agentbox.sh\""
   echo "$END"
 } >> "$RC"
 
 # Provision the personal config dir (login lives here; survives image rebuilds).
-PERSONAL_HOME="${MY_CLAUDED_HOME:-$HOME/.claude-personal}"
+PERSONAL_HOME="${AGENTBOX_HOME:-$HOME/.agentbox}"
 CONFIG_HOME="$PERSONAL_HOME/.claude"
 mkdir -p "$CONFIG_HOME"
 
 # Mirror the host git identity so commits made inside the container are attributed
 # correctly. (Credential auth + safe.directory are baked into the image; the token
-# itself is injected at launch by my-clauded.sh.)
+# itself is injected at launch by the agentbox launcher.)
 GIT_NAME="$(git config --global user.name 2>/dev/null || true)"
 GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
 if [ -n "$GIT_EMAIL" ]; then
@@ -50,7 +54,8 @@ else
   echo "  Set it on the host: git config --global user.name '...'; git config --global user.email '...'" >&2
 fi
 
-# Status line: copy the script and register it in settings.json (merge, don't clobber).
+# Status line (Claude only — Codex has its own TUI): copy the script and register
+# it in Claude's settings.json (merge, don't clobber).
 install -m 0755 "$SCRIPT_DIR/statusline.sh" "$CONFIG_HOME/statusline.sh"
 python3 - "$CONFIG_HOME/settings.json" <<'PY'
 import json, os, sys
@@ -64,5 +69,5 @@ data["statusLine"] = {"type": "command", "command": "~/.claude/statusline.sh"}
 json.dump(data, open(path, "w"), indent=2)
 PY
 
-echo "Installed. Run:  source \"$RC\"   then:  my-clauded"
+echo "Installed. Run:  source \"$RC\"   then:  my-clauded   (or: my-codexd)"
 echo "Build the image first if you haven't:  make build"

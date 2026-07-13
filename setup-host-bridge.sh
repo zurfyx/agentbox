@@ -9,17 +9,17 @@
 #   4. verifies the bridge end-to-end from inside the container.
 set -euo pipefail
 
-PERSONAL_HOME="${MY_CLAUDED_HOME:-$HOME/.claude-personal}"
+PERSONAL_HOME="${AGENTBOX_HOME:-$HOME/.agentbox}"
 SSH_DIR="$PERSONAL_HOME/.ssh"
-KEY="$SSH_DIR/id_clauded_host"
-IMAGE="${MY_CLAUDED_IMAGE:-claude-personal}"
+KEY="$SSH_DIR/id_agentbox_host"
+IMAGE="${AGENTBOX_IMAGE:-agentbox}"
 
 mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
 
 # 1. Dedicated keypair — never overwrite an existing one.
 if [ ! -f "$KEY" ]; then
-  ssh-keygen -t ed25519 -N "" -C "clauded-host-bridge" -f "$KEY"
+  ssh-keygen -t ed25519 -N "" -C "agentbox-host-bridge" -f "$KEY"
   echo "Generated $KEY"
 else
   echo "Key already exists: $KEY"
@@ -59,10 +59,10 @@ esac
 echo "Verifying bridge from the container..."
 if docker run --rm \
     -v "$PERSONAL_HOME:/home/node" \
-    -e CLAUDED_HOST=host.docker.internal \
-    -e CLAUDED_HOST_USER="$USER" \
+    -e AGENTBOX_HOST=host.docker.internal \
+    -e AGENTBOX_HOST_USER="$USER" \
     --entrypoint onhost "$IMAGE" 'echo onhost reached $(hostname) as $(whoami)'; then
-  echo "Bridge works. Inside my-clauded, run:  onhost <cmd>   (or: onhost -t <cmd>)"
+  echo "Bridge works. Inside my-clauded / my-codexd, run:  onhost <cmd>   (or: onhost -t <cmd>)"
 else
   echo "Bridge test FAILED — check Remote Login is on and the image is built (make build)." >&2
   exit 1
