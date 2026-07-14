@@ -64,7 +64,7 @@ Override via env vars before sourcing, or in your shell:
 | `AGENTBOX_IMAGE`               | `agentbox`    | Docker image name                         |
 | `AGENTBOX_HOME`                | `~/.agentbox` | Persistent config/logins on host          |
 | `AGENTBOX_AUTO_UPDATE`         | `1`           | Auto-update the image on launch (`0` off) |
-| `AGENTBOX_UPDATE_INTERVAL_DAYS`| `7`           | How often the launch check may run        |
+| `AGENTBOX_UPDATE_INTERVAL_DAYS`| `1`           | How often the launch check may run        |
 
 Pin versions: `make build VERSION=1.2.3 CODEX_VERSION=0.144.3`.
 
@@ -77,15 +77,15 @@ silence it). Updating means rebuilding the image, and the launcher does that for
 you automatically.
 
 **Auto-update on launch (default).** When you run `agentbox claude` / `codex`,
-the launcher checks — at most once every 7 days — whether a newer Claude or Codex
-has been published, and if so rebuilds the image before starting (reusing cached
+the launcher checks — at most once a day — whether a newer Claude or Codex has
+been published, and if so rebuilds the image before starting (reusing cached
 layers, so only the changed agent refetches). It's silent when you're current,
 skips gracefully when offline, and never blocks the launch on failure. Tune or
 turn it off:
 
 ```sh
 AGENTBOX_AUTO_UPDATE=0 agentbox claude          # skip the check this run
-export AGENTBOX_UPDATE_INTERVAL_DAYS=1          # check daily instead of weekly
+export AGENTBOX_UPDATE_INTERVAL_DAYS=7          # check weekly instead of daily
 ```
 
 **Manual / forced.** Update right now, or pin exact versions:

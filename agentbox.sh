@@ -20,7 +20,7 @@
 : "${AGENTBOX_REPO:=${${(%):-%x}:A:h}}"
 
 # Keep the image current on launch. Throttled: at most once every
-# $AGENTBOX_UPDATE_INTERVAL_DAYS (default 7). Rebuilds ONLY when a newer Claude
+# $AGENTBOX_UPDATE_INTERVAL_DAYS (default 1). Rebuilds ONLY when a newer Claude
 # or Codex is actually published, reusing cached layers (only the changed agent's
 # layer refetches). Disable with AGENTBOX_AUTO_UPDATE=0. Never blocks on failure
 # (offline, npm error, missing repo) — it just proceeds with the current image.
@@ -39,7 +39,7 @@ _agentbox_maybe_update() {
   fi
 
   age=$(( (now - last) / 86400 ))
-  [ "$age" -lt "${AGENTBOX_UPDATE_INTERVAL_DAYS:-7}" ] && return 0
+  [ "$age" -lt "${AGENTBOX_UPDATE_INTERVAL_DAYS:-1}" ] && return 0
   echo "$now" > "$stamp"   # stamp up front so we check at most once per interval
 
   local latest_claude latest_codex
