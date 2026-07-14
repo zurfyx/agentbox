@@ -40,10 +40,10 @@ source ~/.zshrc
 ## Usage
 
 ```sh
-my-clauded                 # personal Claude Code in the current directory
-my-codexd                  # personal Codex in the current directory
-agentbox claude "fix bug"  # dispatcher form (== my-clauded)
-agentbox codex             # (== my-codexd)
+agentbox claude              # personal Claude Code in the current directory
+agentbox codex               # personal Codex in the current directory
+agentbox claude "fix bug"
+agentbox claude --resume
 ```
 
 First run of each prompts you to log in with your **personal** account:
@@ -103,7 +103,7 @@ One-time setup (run on the Mac):
 make host-bridge          # generates a dedicated key, authorizes it, verifies
 ```
 
-Then, from inside `my-clauded` / `my-codexd`:
+Then, from inside an agentbox session:
 
 ```sh
 onhost 'cd ~/Code/proj && ./run-macos-smoke.sh'   # run + capture output

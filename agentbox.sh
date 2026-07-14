@@ -3,8 +3,8 @@
 # Source this from ~/.zshrc:  source ~/Code/agentbox/agentbox.sh
 #
 # Commands:
-#   my-clauded [args...]     personal Claude Code   (also: agentbox claude ...)
-#   my-codexd  [args...]     personal Codex         (also: agentbox codex ...)
+#   agentbox claude [args...]    personal Claude Code
+#   agentbox codex  [args...]    personal Codex
 #
 # Isolation model:
 #   * Personal config/login lives in $AGENTBOX_HOME (default ~/.agentbox),
@@ -51,15 +51,12 @@ _agentbox_run() {
     "$AGENTBOX_IMAGE" "$@"
 }
 
-my-clauded() { _agentbox_run claude claude --dangerously-skip-permissions "$@"; }
-my-codexd()  { _agentbox_run codex  codex  --dangerously-bypass-approvals-and-sandbox "$@"; }
-
-# Dispatcher: agentbox {claude|codex} [args...]
+# Entry point: agentbox {claude|codex} [args...]
 agentbox() {
   local sub="${1:-}"; [ "$#" -gt 0 ] && shift
   case "$sub" in
-    claude) my-clauded "$@" ;;
-    codex)  my-codexd "$@" ;;
-    *) echo "usage: agentbox {claude|codex} [args...]   (or: my-clauded / my-codexd)" >&2; return 2 ;;
+    claude) _agentbox_run claude claude --dangerously-skip-permissions "$@" ;;
+    codex)  _agentbox_run codex  codex  --dangerously-bypass-approvals-and-sandbox "$@" ;;
+    *) echo "usage: agentbox {claude|codex} [args...]" >&2; return 2 ;;
   esac
 }

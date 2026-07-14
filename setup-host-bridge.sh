@@ -62,7 +62,7 @@ if docker run --rm \
     -e AGENTBOX_HOST=host.docker.internal \
     -e AGENTBOX_HOST_USER="$USER" \
     --entrypoint onhost "$IMAGE" 'echo onhost reached $(hostname) as $(whoami)'; then
-  echo "Bridge works. Inside my-clauded / my-codexd, run:  onhost <cmd>   (or: onhost -t <cmd>)"
+  echo "Bridge works. Inside an agentbox session, run:  onhost <cmd>   (or: onhost -t <cmd>)"
 else
   echo "Bridge test FAILED — check Remote Login is on and the image is built (make build)." >&2
   exit 1

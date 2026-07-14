@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Wire the agentbox launchers (my-clauded / my-codexd) into the shell by sourcing
-# agentbox.sh from ~/.zshrc. Idempotent: re-running just refreshes the block.
+# Wire the agentbox launcher into the shell by sourcing agentbox.sh from ~/.zshrc.
+# Idempotent: re-running just refreshes the block.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,5 +69,5 @@ data["statusLine"] = {"type": "command", "command": "~/.claude/statusline.sh"}
 json.dump(data, open(path, "w"), indent=2)
 PY
 
-echo "Installed. Run:  source \"$RC\"   then:  my-clauded   (or: my-codexd)"
+echo "Installed. Run:  source \"$RC\"   then:  agentbox claude   (or: agentbox codex)"
 echo "Build the image first if you haven't:  make build"

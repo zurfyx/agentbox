@@ -20,11 +20,11 @@ rebuild: ## Rebuild without cache (picks up latest agent versions)
 install: ## Add the shell functions to ~/.zshrc
 	./install.sh
 
-run: build ## Build then run Claude in the current dir (parity with my-clauded)
+run: build ## Build then run Claude in the current dir (parity with agentbox claude)
 	mkdir -p "$(HOME_DIR)"
 	$(DOCKER_ENV) docker run $(DOCKER_ARGS) "$(IMAGE)" claude --dangerously-skip-permissions
 
-run-codex: build ## Build then run Codex in the current dir (parity with my-codexd)
+run-codex: build ## Build then run Codex in the current dir (parity with agentbox codex)
 	mkdir -p "$(HOME_DIR)"
 	$(DOCKER_ENV) docker run $(DOCKER_ARGS) -p 127.0.0.1:1455:1455 -e OPENAI_API_KEY \
 	  "$(IMAGE)" codex --dangerously-bypass-approvals-and-sandbox
