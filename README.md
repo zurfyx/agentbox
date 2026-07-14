@@ -127,21 +127,20 @@ the target with `AGENTBOX_HOST` / `AGENTBOX_HOST_USER`.
 TUI and ignores this.
 
 ```
-[Opus 4.8] agentbox |  main | █░░░░░░░░░ 11% | 71% 3h  85% 3d | $1.81 | +0/-0 | 13m35s
-                              └ context used   └ quota left, and when it resets:
-                                                 71% of the 5h session (resets in 3h)
-                                                 85% of the 7d week    (resets in 3d)
+[Opus 4.8] agentbox |  main | █░░░░░░░░░ 11% | 29% 3h  15% 3d | $1.81 | +0/-0 | 13m35s
+                              └ context used   └ quota used, and when it resets:
+                                                 29% of the 5h session (resets in 3h)
+                                                 15% of the 7d week    (resets in 3d)
 ```
 
-The quota figures come from `.rate_limits` on the JSON that Claude Code pipes to
-the script on stdin — the same numbers `/usage` reports, not an estimate. Two
-things about that payload are easy to get wrong:
+Both percentages count **up**: 0% on a fresh window, 100% when exhausted — same
+direction as the context bar beside them. Dim below 70%, yellow at 70%, red at 90%.
 
-- the API reports quota **consumed** (`used_percentage`); the script displays what's
-  **left** (`100 - used`), so it reads naturally next to the time remaining.
-- `resets_at` is a **unix epoch in seconds**, not an ISO string (Claude Code has a
-  separate code path that emits ISO — don't copy that one). The script handles
-  both shapes anyway.
+The quota figures come from `.rate_limits` on the JSON that Claude Code pipes to
+the script on stdin — the same numbers `/usage` reports, not an estimate. One
+thing about that payload is easy to get wrong: `resets_at` is a **unix epoch in
+seconds**, not an ISO string (Claude Code has a separate code path that emits ISO
+— don't copy that one). The script handles both shapes anyway.
 
 Claude Code only sends `.rate_limits` on subscription auth (Max/Pro). On an API
 key the whole segment self-hides, so the script is safe to use either way.

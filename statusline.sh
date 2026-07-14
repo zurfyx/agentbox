@@ -41,7 +41,8 @@ for ((i = 0; i < FILLED; i++)); do BAR="${BAR}█"; done
 for ((i = 0; i < EMPTY; i++)); do BAR="${BAR}░"; done
 
 # Subscription quota. Claude Code only sends .rate_limits on subscription auth
-# (Max/Pro), so on an API key the whole segment self-hides.
+# (Max/Pro), so on an API key the whole segment self-hides. We display it as-is
+# (consumed), so it counts UP toward 100% like the context bar does.
 # used_percentage is 0-100; resets_at is a unix epoch in SECONDS.
 # Time math stays in bash/jq on purpose: `date -d` (GNU) and `date -r` (BSD)
 # are incompatible, and this script runs on both macOS and Linux.
@@ -57,18 +58,18 @@ fmt_left() { # seconds remaining -> single coarsest unit, e.g. 2d / 1h / 47m
 }
 
 quota_seg() { # used_pct, resets_at(epoch), fallback_label
-  local used=$1 reset=$2 label=$3 left col tail
+  local used=$1 reset=$2 label=$3 col tail
   [ -z "$used" ] && return
-  # The API reports quota CONSUMED; we display quota LEFT, to read naturally
-  # alongside the time left. Colors invert accordingly: red when running out.
-  left=$(printf '%.0f' "$(echo "$used" | awk '{print 100 - $1}')")
-  if [ "$left" -le 10 ]; then col='\033[31m'
-  elif [ "$left" -le 30 ]; then col='\033[33m'
+  # Show quota CONSUMED, as the API reports it: 0% on a fresh window, 100% when
+  # exhausted — matching the context bar next to it, which also counts up.
+  used=$(printf '%.0f' "$used")
+  if [ "$used" -ge 90 ]; then col='\033[31m'
+  elif [ "$used" -ge 70 ]; then col='\033[33m'
   else col="$DIM"; fi
   # Prefer a live countdown; fall back to the static window label if the
   # server didn't send a reset time.
   if [ -n "$reset" ]; then tail=$(fmt_left $((reset - NOW))); else tail="$label"; fi
-  printf "%b%s%%%b %b%s%b " "$col" "$left" "$R" "$DIM" "$tail" "$R"
+  printf "%b%s%%%b %b%s%b " "$col" "$used" "$R" "$DIM" "$tail" "$R"
 }
 
 rl() { echo "$input" | jq -r "(.rate_limits.$1.$2 // empty) | if type==\"string\" then (sub(\"\\\\.[0-9]+\";\"\") | fromdateiso8601) else . end"; }
