@@ -59,29 +59,44 @@ and disposable).
 
 Override via env vars before sourcing, or in your shell:
 
-| Var               | Default        | Meaning                          |
-| ----------------- | -------------- | -------------------------------- |
-| `AGENTBOX_IMAGE`  | `agentbox`     | Docker image name                |
-| `AGENTBOX_HOME`   | `~/.agentbox`  | Persistent config/logins on host |
+| Var                            | Default       | Meaning                                   |
+| ------------------------------ | ------------- | ----------------------------------------- |
+| `AGENTBOX_IMAGE`               | `agentbox`    | Docker image name                         |
+| `AGENTBOX_HOME`                | `~/.agentbox` | Persistent config/logins on host          |
+| `AGENTBOX_AUTO_UPDATE`         | `1`           | Auto-update the image on launch (`0` off) |
+| `AGENTBOX_UPDATE_INTERVAL_DAYS`| `7`           | How often the launch check may run        |
 
 Pin versions: `make build VERSION=1.2.3 CODEX_VERSION=0.144.3`.
 
 ## Updating
 
-The agents are **baked into the image**, so they don't self-update — the
-container is disposable (`--rm`) and its global install dir isn't writable, so
-Claude Code's background auto-update would just fail on every start. That's
-expected, not a bug; the image sets `DISABLE_AUTOUPDATER=1` to silence it.
+The agents are **baked into the image** — the container is disposable (`--rm`)
+and its global install dir isn't writable, so Claude Code's in-container
+background auto-update can't work (the image sets `DISABLE_AUTOUPDATER=1` to
+silence it). Updating means rebuilding the image, and the launcher does that for
+you automatically.
 
-The one supported update path is rebuilding the image:
+**Auto-update on launch (default).** When you run `agentbox claude` / `codex`,
+the launcher checks — at most once every 7 days — whether a newer Claude or Codex
+has been published, and if so rebuilds the image before starting (reusing cached
+layers, so only the changed agent refetches). It's silent when you're current,
+skips gracefully when offline, and never blocks the launch on failure. Tune or
+turn it off:
 
 ```sh
-cd ~/Code/agentbox && make update      # == rebuild --no-cache; pulls latest Claude + Codex
+AGENTBOX_AUTO_UPDATE=0 agentbox claude          # skip the check this run
+export AGENTBOX_UPDATE_INTERVAL_DAYS=1          # check daily instead of weekly
 ```
 
-Next `agentbox claude` / `agentbox codex` uses the new versions. Pin instead with
-`make build VERSION=… CODEX_VERSION=…`. If you ever see "Auto-update failed"
-inside a session, it means the image predates this setting — just `make update`.
+**Manual / forced.** Update right now, or pin exact versions:
+
+```sh
+cd ~/Code/agentbox && make update               # rebuild --no-cache, latest both
+make build VERSION=1.2.3 CODEX_VERSION=0.144.3  # pin
+```
+
+If you ever see "Auto-update failed" *inside* a session, it's a stale image from
+before this setting — the next launch's auto-update (or `make update`) clears it.
 
 ## Git / GitHub inside the container
 

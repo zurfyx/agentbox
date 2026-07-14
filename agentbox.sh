@@ -16,11 +16,61 @@
 
 : "${AGENTBOX_IMAGE:=agentbox}"
 : "${AGENTBOX_HOME:=$HOME/.agentbox}"
+# Directory of this script (the repo) — used to rebuild the image on update.
+: "${AGENTBOX_REPO:=${${(%):-%x}:A:h}}"
+
+# Keep the image current on launch. Throttled: at most once every
+# $AGENTBOX_UPDATE_INTERVAL_DAYS (default 7). Rebuilds ONLY when a newer Claude
+# or Codex is actually published, reusing cached layers (only the changed agent's
+# layer refetches). Disable with AGENTBOX_AUTO_UPDATE=0. Never blocks on failure
+# (offline, npm error, missing repo) — it just proceeds with the current image.
+_agentbox_maybe_update() {
+  case "${AGENTBOX_AUTO_UPDATE:-1}" in 0 | off | no) return 0 ;; esac
+  mkdir -p "$AGENTBOX_HOME"
+  local stamp="$AGENTBOX_HOME/.last-update-check" now last age
+  now=$(date +%s); last=0; [ -f "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
+
+  # First run / after `make clean`: build so there's something to launch.
+  if ! docker image inspect "$AGENTBOX_IMAGE" >/dev/null 2>&1; then
+    echo "agentbox: image '$AGENTBOX_IMAGE' not found — building…" >&2
+    docker build -t "$AGENTBOX_IMAGE" "$AGENTBOX_REPO" >"$AGENTBOX_HOME/.last-update.log" 2>&1 \
+      && echo "$now" > "$stamp" || echo "agentbox: build failed (see $AGENTBOX_HOME/.last-update.log)" >&2
+    return 0
+  fi
+
+  age=$(( (now - last) / 86400 ))
+  [ "$age" -lt "${AGENTBOX_UPDATE_INTERVAL_DAYS:-7}" ] && return 0
+  echo "$now" > "$stamp"   # stamp up front so we check at most once per interval
+
+  local latest_claude latest_codex
+  latest_claude=$(npm view @anthropic-ai/claude-code version 2>/dev/null) || latest_claude=""
+  latest_codex=$(npm view @openai/codex version 2>/dev/null) || latest_codex=""
+  [ -z "$latest_claude$latest_codex" ] && return 0   # offline / npm unavailable
+
+  local vers cur_claude cur_codex
+  vers=$(docker run --rm --entrypoint sh "$AGENTBOX_IMAGE" -c 'claude --version 2>/dev/null; codex --version 2>/dev/null')
+  cur_claude=$(printf '%s\n' "$vers" | sed -n 's/^\([0-9][0-9.]*\).*/\1/p' | head -1)
+  cur_codex=$(printf '%s\n' "$vers" | grep -i codex | sed -n 's/.*[[:space:]]\([0-9][0-9.]*\).*/\1/p' | head -1)
+
+  if { [ -n "$latest_claude" ] && [ "$latest_claude" != "$cur_claude" ]; } ||
+     { [ -n "$latest_codex" ] && [ "$latest_codex" != "$cur_codex" ]; }; then
+    echo "agentbox: updating (claude ${cur_claude:-?}→${latest_claude:-$cur_claude}, codex ${cur_codex:-?}→${latest_codex:-$cur_codex})…" >&2
+    if docker build \
+        --build-arg CLAUDE_VERSION="${latest_claude:-latest}" \
+        --build-arg CODEX_VERSION="${latest_codex:-latest}" \
+        -t "$AGENTBOX_IMAGE" "$AGENTBOX_REPO" >"$AGENTBOX_HOME/.last-update.log" 2>&1; then
+      echo "agentbox: updated." >&2
+    else
+      echo "agentbox: update failed (see $AGENTBOX_HOME/.last-update.log) — continuing with current image." >&2
+    fi
+  fi
+}
 
 # Shared runner: _agentbox_run <agent> <in-container command + args...>
 _agentbox_run() {
   local agent="$1"; shift
   mkdir -p "$AGENTBOX_HOME"
+  _agentbox_maybe_update
 
   # GitHub auth for git inside the container (Linux can't use the Mac gh/keychain).
   # Passed by NAME below so it never appears in the docker-run argv (ps-visible).
