@@ -9,13 +9,16 @@ DOCKER_ARGS = --rm -it \
   -v "$(HOME_DIR)":/home/node -v /Users:/Users -v /Volumes:/Volumes -v /tmp:/tmp -w "$(PWD)" \
   -e GH_TOKEN -e AGENTBOX_HOST=host.docker.internal -e AGENTBOX_HOST_USER="$$USER"
 
-.PHONY: build rebuild install run run-codex shell host-bridge clean help
+.PHONY: build rebuild update install run run-codex shell host-bridge clean help
 
 build: ## Build the image (pin: make build VERSION=1.2.3 CODEX_VERSION=0.144.3)
 	docker build --build-arg CLAUDE_VERSION=$(VERSION) --build-arg CODEX_VERSION=$(CODEX_VERSION) -t $(IMAGE) .
 
 rebuild: ## Rebuild without cache (picks up latest agent versions)
 	docker build --no-cache --build-arg CLAUDE_VERSION=$(VERSION) --build-arg CODEX_VERSION=$(CODEX_VERSION) -t $(IMAGE) .
+
+update: rebuild ## Update the agents to latest (the only supported update path)
+	@echo "Updated. Claude + Codex are now at the versions baked into the fresh image."
 
 install: ## Add the shell functions to ~/.zshrc
 	./install.sh

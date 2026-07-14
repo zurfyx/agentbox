@@ -65,7 +65,23 @@ Override via env vars before sourcing, or in your shell:
 | `AGENTBOX_HOME`   | `~/.agentbox`  | Persistent config/logins on host |
 
 Pin versions: `make build VERSION=1.2.3 CODEX_VERSION=0.144.3`.
-Upgrade to latest: `make rebuild`.
+
+## Updating
+
+The agents are **baked into the image**, so they don't self-update — the
+container is disposable (`--rm`) and its global install dir isn't writable, so
+Claude Code's background auto-update would just fail on every start. That's
+expected, not a bug; the image sets `DISABLE_AUTOUPDATER=1` to silence it.
+
+The one supported update path is rebuilding the image:
+
+```sh
+cd ~/Code/agentbox && make update      # == rebuild --no-cache; pulls latest Claude + Codex
+```
+
+Next `agentbox claude` / `agentbox codex` uses the new versions. Pin instead with
+`make build VERSION=… CODEX_VERSION=…`. If you ever see "Auto-update failed"
+inside a session, it means the image predates this setting — just `make update`.
 
 ## Git / GitHub inside the container
 
@@ -155,6 +171,7 @@ install` / rebuild. Edit `statusline.sh` *here*, then re-run `make install`.
 ```
 make build      Build the image (VERSION=x.y.z CODEX_VERSION=a.b.c to pin)
 make rebuild    Rebuild without cache
+make update     Update agents to latest (rebuild; the only update path)
 make install    Add the shell functions to ~/.zshrc
 make run        Build + run Claude in the current directory
 make run-codex  Build + run Codex in the current directory

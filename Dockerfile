@@ -30,6 +30,12 @@ RUN chmod +x /usr/local/bin/git-credential-ghtoken \
 COPY onhost /usr/local/bin/onhost
 RUN chmod +x /usr/local/bin/onhost
 
+# Disposable container: the agents can't (and shouldn't) update themselves in
+# place — the global install dir isn't writable by `node` and any change is lost
+# on exit. Updates happen by rebuilding the image (`make update`). Silence Claude
+# Code's background auto-updater so it doesn't error on every start.
+ENV DISABLE_AUTOUPDATER=1
+
 # Claude Code (and Codex) refuse their --dangerously-* flags as root, so run as
 # the non-root "node" user (uid 1000) that ships with the base image. Its home
 # (/home/node) — holding ~/.claude and ~/.codex — is mounted from the host.
