@@ -54,8 +54,8 @@ else
   echo "  Set it on the host: git config --global user.name '...'; git config --global user.email '...'" >&2
 fi
 
-# Status line (Claude only — Codex has its own TUI): copy the script and register
-# it in Claude's settings.json (merge, don't clobber).
+# Status line — Claude: copy the script and register it in settings.json (merge,
+# don't clobber). Claude renders its status line via an external command.
 install -m 0755 "$SCRIPT_DIR/statusline.sh" "$CONFIG_HOME/statusline.sh"
 python3 - "$CONFIG_HOME/settings.json" <<'PY'
 import json, os, sys
@@ -67,6 +67,39 @@ if os.path.exists(path):
 data.setdefault("theme", "auto")
 data["statusLine"] = {"type": "command", "command": "~/.claude/statusline.sh"}
 json.dump(data, open(path, "w"), indent=2)
+PY
+
+# Status line — Codex: enable the built-in TUI status line with the same quota
+# indicators (model, dir, context, tokens, 5h + weekly limits). Codex has no
+# external-command statusline like Claude's — it renders a fixed set of components
+# you order in config.toml. Merge without clobbering existing keys; idempotent.
+CODEX_HOME="$PERSONAL_HOME/.codex"
+mkdir -p "$CODEX_HOME"
+python3 - "$CODEX_HOME/config.toml" <<'PY'
+import sys
+path = sys.argv[1]
+try:
+    text = open(path).read()
+except FileNotFoundError:
+    text = ""
+status = ('status_line = ["model-with-reasoning", "current-dir", "context-usage", '
+          '"used-tokens", "five-hour-limit", "weekly-limit"]')
+lines = text.splitlines()
+if any(l.lstrip().startswith("status_line") for l in lines):
+    pass  # already configured — leave the user's choice alone
+else:
+    # Insert under an existing bare [tui] header, else append a fresh [tui] table.
+    out, inserted = [], False
+    for l in lines:
+        out.append(l)
+        if not inserted and l.strip() == "[tui]":
+            out.append(status)
+            inserted = True
+    if not inserted:
+        if out and out[-1].strip() != "":
+            out.append("")
+        out += ["[tui]", status]
+    open(path, "w").write("\n".join(out) + "\n")
 PY
 
 echo "Installed. Run:  source \"$RC\"   then:  agentbox claude   (or: agentbox codex)"
