@@ -86,7 +86,7 @@ except FileNotFoundError:
 # often-cited context-usage, which this build rejects). Codex renders each item
 # with a fixed label and no progress bar — there is no external-command hook.
 keys = [
-    'status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit"]',
+    'status_line = ["model-with-reasoning", "git-branch", "context-used", "five-hour-limit", "weekly-limit"]',
     "status_line_use_colors = true",
 ]
 lines = text.splitlines()
