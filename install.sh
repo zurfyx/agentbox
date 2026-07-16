@@ -82,10 +82,15 @@ try:
     text = open(path).read()
 except FileNotFoundError:
     text = ""
-status = ('status_line = ["model-with-reasoning", "current-dir", "context-usage", '
-          '"used-tokens", "five-hour-limit", "weekly-limit"]')
+# Verified token names for the built-in TUI status line (context-used, not the
+# often-cited context-usage, which this build rejects). Codex renders each item
+# with a fixed label and no progress bar — there is no external-command hook.
+keys = [
+    'status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit"]',
+    "status_line_use_colors = true",
+]
 lines = text.splitlines()
-if any(l.lstrip().startswith("status_line") for l in lines):
+if any(l.split("=", 1)[0].strip() == "status_line" for l in lines):
     pass  # already configured — leave the user's choice alone
 else:
     # Insert under an existing bare [tui] header, else append a fresh [tui] table.
@@ -93,12 +98,12 @@ else:
     for l in lines:
         out.append(l)
         if not inserted and l.strip() == "[tui]":
-            out.append(status)
+            out.extend(keys)
             inserted = True
     if not inserted:
         if out and out[-1].strip() != "":
             out.append("")
-        out += ["[tui]", status]
+        out += ["[tui]", *keys]
     open(path, "w").write("\n".join(out) + "\n")
 PY
 
