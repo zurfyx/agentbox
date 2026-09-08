@@ -8,7 +8,7 @@
 #        "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #   Requires: jq
 #
-# Shows: [model] dir | branch | context-usage bar + % | quota | cost | +added/-removed | elapsed
+# Shows: [model] dir | branch | context-usage bar + % | quota | prompt cache | cost | +added/-removed | elapsed
 input=$(cat)
 MODEL=$(echo "$input" | jq -r '.model.display_name')
 DIR_PATH=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
@@ -75,7 +75,33 @@ quota_seg() { # used_pct, resets_at(epoch), fallback_label
 rl() { echo "$input" | jq -r "(.rate_limits.$1.$2 // empty) | if type==\"string\" then (sub(\"\\\\.[0-9]+\";\"\") | fromdateiso8601) else . end"; }
 FIVE=$(rl five_hour used_percentage);  FIVE_AT=$(rl five_hour resets_at)
 WEEK=$(rl seven_day used_percentage);  WEEK_AT=$(rl seven_day resets_at)
+# Prompt cache: time left before the cached prefix goes cold, as a bare "42m"
+# alongside the quota countdowns. The written TTL (5m/1h) isn't printed — the
+# countdown already implies it — and a cold prefix is just ❄, no word, which is
+# the only state that needs to catch the eye. Only sent after the first API
+# response, so the
+# segment self-hides before then. Gate on caching_observed, otherwise a provider
+# that never reports cache tokens renders as permanently cold. Read the booleans
+# with `== true` — jq's `//` treats `false` as absent.
+CACHE=""
+if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true')" = "true" ]; then
+  if [ "$(echo "$input" | jq -r '.prompt_cache.warm == true')" = "true" ]; then
+    EXP=$(echo "$input" | jq -r '.prompt_cache.expires_at // empty')
+    [ -n "$EXP" ] && CACHE="${DIM}$(fmt_left $((EXP - NOW)))${R}"
+  else
+    CACHE="\033[33m❄${R}"
+  fi
+fi
+
+rl() { echo "$input" | jq -r "(.rate_limits.$1.$2 // empty) | if type==\"string\" then (sub(\"\\\\.[0-9]+\";\"\") | fromdateiso8601) else . end"; }
+FIVE=$(rl five_hour used_percentage);  FIVE_AT=$(rl five_hour resets_at)
+WEEK=$(rl seven_day used_percentage);  WEEK_AT=$(rl seven_day resets_at)
+# Cache leads the same group as the quota timers — all three are "how long
+# until this resets", so they read as one cluster rather than three segments,
+# and the cache is the one that turns over fastest.
 QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
-[ -n "$QUOTA" ] && QUOTA=" | ${QUOTA% }"
+QUOTA="${QUOTA% }"
+[ -n "$CACHE" ] && QUOTA="${CACHE}${QUOTA:+ $QUOTA}"
+[ -n "$QUOTA" ] && QUOTA=" | ${QUOTA}"
 
 echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} | ${DIM}+${ADDED}/-${REMOVED}${R} | ${MINS}m${SECS}s"
