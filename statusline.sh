@@ -90,4 +90,7 @@ if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .promp
   [ -n "$EXP" ] && CACHE=" | ${DIM}$(fmt_left $((EXP - NOW)))${R}"
 fi
 
-echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} | ${DIM}+${ADDED}/-${REMOVED}${R} | ${MINS}m${SECS}s${CACHE}"
+# Cost, diff stat and elapsed are one group: all three are session totals that
+# only ever count up, so they answer the same question — what this session has
+# spent. The cache countdown keeps the last slot to itself.
+echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} ${DIM}+${ADDED}/-${REMOVED}${R} ${MINS}m${SECS}s${CACHE}"
