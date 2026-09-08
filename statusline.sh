@@ -8,22 +8,49 @@
 #        "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #   Requires: jq
 #
-# Shows: [model] dir | branch | context-usage bar + % | quota | prompt cache | cost | +added/-removed | elapsed
+# Shows: [model] dir | branch +added/-removed | context bar + % | quota | cost + elapsed | cache TTL
 input=$(cat)
 MODEL=$(echo "$input" | jq -r '.model.display_name')
 DIR_PATH=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
 DIR=$(basename "$DIR_PATH")
 PCT=$(echo "$input" | jq -r '(.context_window.used_percentage // 0) | round')
 COST=$(printf '$%.2f' "$(echo "$input" | jq -r '.cost.total_cost_usd // 0')")
-ADDED=$(echo "$input" | jq -r '.cost.total_lines_added // 0')
-REMOVED=$(echo "$input" | jq -r '.cost.total_lines_removed // 0')
 DURATION_MS=$(echo "$input" | jq -r '.cost.total_duration_ms // 0')
 MINS=$((DURATION_MS / 60000))
 SECS=$(((DURATION_MS % 60000) / 1000))
 
-# Git branch (if inside a repo)
-BRANCH=$(git -C "$DIR_PATH" branch --show-current 2>/dev/null)
-[ -n "$BRANCH" ] && BRANCH=" |  ${BRANCH}"
+# Git branch (if inside a repo), followed by the size of the work in flight.
+#
+# That size is the diff this branch would land as a PR: everything since it
+# forked from the default branch, working tree included. On the default branch
+# the merge base *is* HEAD, so the same expression degrades to "just my
+# uncommitted changes" with no special case. It counts the work, not the
+# session — reopening a branch tomorrow still shows the whole thing, which is
+# what you want when judging whether a PR has grown too big.
+#
+# --no-optional-locks keeps a status line that renders on every keystroke from
+# fighting a real git command for the index lock.
+g() { git --no-optional-locks -C "$DIR_PATH" "$@" 2>/dev/null; }
+BRANCH=$(g branch --show-current)
+if [ -n "$BRANCH" ]; then
+  BASE=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  FROM=$(g merge-base HEAD "${BASE:-origin/main}")
+  STAT=$(g diff --shortstat "${FROM:-HEAD}")
+  A=$(echo "$STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+  D=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+  # git diff can't see untracked files, but a brand-new file is exactly the
+  # kind of work this number exists to measure — so count its lines too.
+  # Capped at 200 files: past that the count is noise, and cat'ing an unbounded
+  # tree on every render is not worth the accuracy.
+  NEW=$(g ls-files --others --exclude-standard | head -200)
+  if [ -n "$NEW" ]; then
+    NEWLINES=$(echo "$NEW" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' ')
+    A=$((${A:-0} + NEWLINES))
+  fi
+  # Nothing changed yet: show the branch alone rather than a hollow +0/-0.
+  [ -n "$A$D" ] && BRANCH="${BRANCH} ${DIM}+${A:-0}/-${D:-0}${R}"
+  BRANCH=" |  ${BRANCH}"
+fi
 
 # Color by context usage
 if [ "$PCT" -ge 90 ]; then C='\033[31m'
@@ -90,7 +117,6 @@ if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .promp
   [ -n "$EXP" ] && CACHE=" | ${DIM}$(fmt_left $((EXP - NOW)))${R}"
 fi
 
-# Cost, diff stat and elapsed are one group: all three are session totals that
-# only ever count up, so they answer the same question — what this session has
-# spent. The cache countdown keeps the last slot to itself.
-echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} ${DIM}+${ADDED}/-${REMOVED}${R} ${MINS}m${SECS}s${CACHE}"
+# Cost and elapsed are one group: both are session totals that only count up.
+# The cache countdown keeps the last slot to itself.
+echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} ${MINS}m${SECS}s${CACHE}"
