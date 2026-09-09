@@ -123,10 +123,12 @@ QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
 CACHE=""
 if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .prompt_cache.warm == true')" = "true" ]; then
   EXP=$(echo "$input" | jq -r '.prompt_cache.expires_at // empty')
-  # ⚡ = the fast path, held for another N. If your terminal gives the bolt
-  # emoji presentation and the double width jitters the line, append U+FE0E
-  # (⚡︎) to force the narrow text form.
-  [ -n "$EXP" ] && CACHE=" | ${DIM}⚡$(fmt_left $((EXP - NOW)))${R}"
+  # 󰈸 nf-md-fire (U+F0238): the cache is still hot for another N. It's a
+  # nerd-font glyph rather than 🔥 or ⚡ on purpose — those are emoji
+  # presentation, so the terminal paints them its own color and ignores the
+  # dim. Private-use glyphs are plain outlines that take the color you give
+  # them, the same way the  branch icon does.
+  [ -n "$EXP" ] && CACHE=" | ${DIM}󰈸$(fmt_left $((EXP - NOW)))${R}"
 fi
 
 # Cost and elapsed are one group: both are session totals that only count up.
