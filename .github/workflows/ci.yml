@@ -73,15 +73,25 @@ jobs:
           # launcher cases cannot run, which must never pass quietly.
           if ! command -v zsh >/dev/null 2>&1; then
             echo "zsh is not preinstalled on this image; falling back to apt" >&2
+            # `apt-get update` also refreshes the third-party sources the runner
+            # image ships, and a broken index in one of them fails the entire
+            # update even when the Ubuntu indexes are fine. That is what took CI
+            # down here: a persistent "Hash Sum mismatch" on Google Chrome's
+            # repo, which has nothing to do with zsh. Drop the source we do not
+            # need, and do not gate the install on update's exit status -- apt
+            # says as much itself ("old ones used instead"). The install is the
+            # step whose success actually matters.
+            sudo rm -f /etc/apt/sources.list.d/google-chrome.list
             for attempt in 1 2 3; do
-              if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+              sudo apt-get update -qq || echo "apt-get update reported errors; continuing" >&2
+              if sudo apt-get install -y -qq zsh; then
                 break
               fi
               if [ "$attempt" = 3 ]; then
-                echo "::error::zsh is missing and apt-get failed after 3 attempts"
+                echo "::error::zsh is missing and apt-get install failed after 3 attempts"
                 exit 1
               fi
-              echo "apt-get attempt $attempt failed; retrying" >&2
+              echo "apt-get install attempt $attempt failed; retrying" >&2
               sleep $((attempt * 15))
             done
           fi
@@ -209,15 +219,25 @@ jobs:
           # launcher cases cannot run, which must never pass quietly.
           if ! command -v zsh >/dev/null 2>&1; then
             echo "zsh is not preinstalled on this image; falling back to apt" >&2
+            # `apt-get update` also refreshes the third-party sources the runner
+            # image ships, and a broken index in one of them fails the entire
+            # update even when the Ubuntu indexes are fine. That is what took CI
+            # down here: a persistent "Hash Sum mismatch" on Google Chrome's
+            # repo, which has nothing to do with zsh. Drop the source we do not
+            # need, and do not gate the install on update's exit status -- apt
+            # says as much itself ("old ones used instead"). The install is the
+            # step whose success actually matters.
+            sudo rm -f /etc/apt/sources.list.d/google-chrome.list
             for attempt in 1 2 3; do
-              if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+              sudo apt-get update -qq || echo "apt-get update reported errors; continuing" >&2
+              if sudo apt-get install -y -qq zsh; then
                 break
               fi
               if [ "$attempt" = 3 ]; then
-                echo "::error::zsh is missing and apt-get failed after 3 attempts"
+                echo "::error::zsh is missing and apt-get install failed after 3 attempts"
                 exit 1
               fi
-              echo "apt-get attempt $attempt failed; retrying" >&2
+              echo "apt-get install attempt $attempt failed; retrying" >&2
               sleep $((attempt * 15))
             done
           fi
