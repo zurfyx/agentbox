@@ -1,20 +1,43 @@
 #!/bin/bash
-# Claude Code status line — one file, shared by every machine.
 #
-# To wire on a new machine:
-#   1. Save this file as ~/.claude/statusline.sh
-#   2. chmod +x ~/.claude/statusline.sh
-#   3. Add to ~/.claude/settings.json:
+# A status line for Claude Code: model, repository state, context usage, cost,
+# and subscription quota, on one line.
+#
+#   [Opus 5] myrepo |  main +412/-88 | ████████░░ 78% 󰈸47m | $12.40 18m3s | 41% 2h 63% 4d
+#
+# Install
+#   1. Save as ~/.claude/statusline.sh, then `chmod +x ~/.claude/statusline.sh`
+#   2. Add to ~/.claude/settings.json:
 #        "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
-#   Requires: jq
 #
-# Shows: [model] dir |  rev +added/-removed | context bar + % + cache TTL | cost + elapsed | quota
+# Requires jq. Works in a git, Sapling (sl), or Mercurial (hg) checkout —
+# whichever the directory turns out to be — and simply omits the repository
+# segment anywhere else. Nothing else is assumed about the host.
 #
-# Portability, the three things that actually bite:
-#   - macOS /bin/bash is 3.2, so no associative arrays, no ${x,,}, no mapfile.
-#   - macOS has no `timeout` (see TO below) and no `stat -c` (see mtime below).
-#   - GNU `tr` is byte-oriented and shreds multibyte glyphs, so the bar is built
-#     by concatenation (see BAR below).
+# Configuration, all optional, all environment variables:
+#
+#   STATUSLINE_ICONS=ascii    Plain ASCII instead of Unicode and nerd-font
+#                             glyphs. Use this if the bar renders as ??? or the
+#                             icons render as boxes — it means the terminal font
+#                             is not patched.
+#   STATUSLINE_TTL=2          Seconds to cache repository state for.
+#   STATUSLINE_VCS_REASON=1   Pass --reason to sl/hg. Some Sapling deployments
+#                             ask for it for audit logging; upstream Sapling and
+#                             Mercurial reject the flag, so this is off by
+#                             default.
+#   STATUSLINE_LABEL_TPL=...  Override the sl/hg template for the revision
+#                             label. Default prefers an active bookmark, then a
+#                             code-review id where the host provides one, then
+#                             the short hash.
+#
+# Notes for anyone editing this:
+#   - macOS /bin/bash is 3.2: no associative arrays, no ${x,,}, no mapfile.
+#   - macOS has no timeout(1) and its stat wants -f, not -c. See TO and mtime.
+#   - Do NOT build the bar with `tr`. GNU tr is byte-oriented and keeps only the
+#     leading byte of each 3-byte block glyph, emitting invalid UTF-8 that shows
+#     up as replacement characters. Concatenate instead.
+
+: "${STATUSLINE_TTL:=2}"
 
 input=$(cat)
 
@@ -22,11 +45,11 @@ input=$(cat)
 # because tab is IFS whitespace: bash collapses runs of it, so an empty field
 # followed by a populated one would silently shift every later field left.
 #
-# TZ=UTC is load-bearing, not tidiness: jq 1.6 fromdateiso8601 leaks the local
-# DST offset (it leaves tm_isdst set and glibc mktime then "corrects" it), so an
-# already-UTC reset timestamp comes back an hour late while DST is in effect and
-# exactly right in winter. Every other value here is TZ-agnostic, and date +%s
-# is epoch, so pinning the whole call is safe.
+# TZ=UTC is load-bearing, not tidiness. jq 1.6's fromdateiso8601 leaves tm_isdst
+# set and glibc's mktime then "corrects" an already-UTC timestamp, so a reset
+# time comes back an hour late while DST is in effect and exactly right in
+# winter — which is precisely how it escapes notice. jq 1.7 is unaffected, but
+# pinning costs nothing: every value here is TZ-agnostic and date +%s is epoch.
 FIELDS=$(echo "$input" | TZ=UTC jq -r '
   def e:  if . == null then "" else . end;
   def ep: if . == null then ""
@@ -34,11 +57,11 @@ FIELDS=$(echo "$input" | TZ=UTC jq -r '
           else . end;
   [ (.model.display_name // "?")
   , (.workspace.current_dir // .cwd // "")
-  # Report Claude own context_window.used_percentage verbatim: the raw fill of
-  # the model window (total_input_tokens / context_window_size). We do not try
-  # to model the footer undocumented auto-compact reserve, so the footer may
-  # read a couple of points higher near the top. That divergence is expected.
-  # Fall back to the direct ratio only if the field is absent entirely.
+  # Report the host own context_window.used_percentage verbatim: the raw fill of
+  # the model window (total_input_tokens / context_window_size). We do not model
+  # the footer undocumented auto-compact reserve, so the footer may read a
+  # couple of points higher near the top; that divergence is expected. Fall back
+  # to the direct ratio only if the field is absent entirely.
   , ( if (.context_window.used_percentage // null) != null
         then .context_window.used_percentage
       elif (.context_window.context_window_size // 0) > 0
@@ -55,20 +78,20 @@ FIELDS=$(echo "$input" | TZ=UTC jq -r '
   # looks permanently cold. Compare with == true: jq // treats false as absent.
   , ( if (.prompt_cache.caching_observed == true and .prompt_cache.warm == true)
         then (.prompt_cache.expires_at // "") else "" end )
-  ] | map(tostring) | join("")')
+  ] | map(tostring) | join("\u001f")')
 
 IFS=$'\037' read -r MODEL DIR_PATH PCT COST_RAW DURATION_MS \
   FIVE FIVE_AT WEEK WEEK_AT CACHE_EXP <<< "$FIELDS"
 
-# Defaults for the malformed-payload case: every one of these feeds arithmetic
-# or a numeric test below, where an empty string is a hard error, not a zero.
+# Defaults for the malformed-payload case: each of these feeds arithmetic or a
+# numeric test below, where an empty string is a hard error rather than a zero.
 : "${PCT:=0}" "${DURATION_MS:=0}" "${COST_RAW:=0}"
 
 DIR="${DIR_PATH##*/}"
-# Resolve symlinks before looking for a repo. A working directory is often a
-# link into a checkout, and walking its *logical* parents climbs out to the home
-# directory and never sees the repo marker below the link target.
-# `cd && pwd -P` rather than `readlink -f`, which older macOS does not have.
+# Resolve symlinks before looking for a repository. A working directory is often
+# a link into a checkout, and walking its *logical* parents climbs out to the
+# home directory and never sees the marker below the link target. `cd && pwd -P`
+# rather than `readlink -f`, which older macOS does not have.
 PHYS=$(cd "$DIR_PATH" 2>/dev/null && pwd -P) || PHYS=""
 [ -z "$PHYS" ] && PHYS="$DIR_PATH"
 COST=$(printf '$%.2f' "$COST_RAW")
@@ -76,20 +99,30 @@ MINS=$((DURATION_MS / 60000))
 SECS=$(((DURATION_MS % 60000) / 1000))
 NOW=$(date +%s)
 
-# Palette. Defined up here because the VCS block below already needs it — a
-# segment that emits a color without a reset bleeds into the next separator.
-#
-# Basic 16-color on purpose: the shade is whatever the terminal theme maps it
-# to, so one shared script tracks each machine's scheme instead of imposing one.
-# The fixed 256-color alternative sampled from Claude own TUI is
-# 38;5;211 / 38;5;220 / 38;5;108 — swap the three below to use it.
+# Palette, defined up here because the VCS block already needs it — a segment
+# that emits a color without a reset bleeds into the next separator. Basic
+# 16-color on purpose: the shade is whatever the terminal theme maps it to, so
+# one file follows each machine's scheme instead of imposing one. For fixed
+# colors independent of the theme, use 38;5;211 / 38;5;220 / 38;5;108.
 DIM='\033[2m'; R='\033[0m'; YEL='\033[33m'
 RED='\033[31m'; GOLD='\033[33m'; GRN='\033[32m'
 
-# macOS ships no timeout(1) and no gtimeout unless coreutils is installed. That
-# is survivable here only because every VCS call runs in the detached refresh
-# below, which no render ever waits on — a hung repo costs a stale segment, not
-# a stalled bar. Do not move a TO call onto the foreground path.
+# Glyphs.  is nf-dev-git-branch and 󰈸 is nf-md-fire, both nerd-font private-use
+# codepoints. They are deliberately not 🔥/⚡ or similar: emoji are painted in
+# the terminal's own color and ignore the dim attribute, whereas private-use
+# glyphs are plain outlines that take the color they are given. The bar blocks
+# are ordinary Unicode and widely available, but they travel with the same
+# switch so one setting covers every non-ASCII character in the output.
+if [ "$STATUSLINE_ICONS" = ascii ]; then
+  I_VCS="@"; I_FIRE="~"; B_FULL="#"; B_EMPTY="-"; B_OPEN="["; B_CLOSE="]"
+else
+  I_VCS=""; I_FIRE="󰈸"; B_FULL="█"; B_EMPTY="░"; B_OPEN=""; B_CLOSE=""
+fi
+
+# macOS ships no timeout(1), and no gtimeout unless coreutils is installed. That
+# is survivable only because every VCS call runs in the detached refresh below,
+# which no render ever waits on: a hung repository costs a stale segment, not a
+# stalled status line. Do not move a TO call onto the foreground path.
 if command -v timeout >/dev/null 2>&1; then TO() { timeout "$@"; }
 elif command -v gtimeout >/dev/null 2>&1; then TO() { gtimeout "$@"; }
 else TO() { shift; "$@"; }; fi
@@ -99,84 +132,31 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; 
 # ---------------------------------------------------------------------------
 # Work in flight
 #
-# The number next to the revision is the diff this work would land as: every
-# change since it forked from upstream, working tree included. On an unmodified
-# upstream commit the fork point *is* the current commit, so the same expression
-# degrades to "just my uncommitted changes" with no special case. It measures
-# the work, not the session — reopening a branch tomorrow still shows the whole
-# thing, which is what you want when judging whether a change has grown too big.
+# The number beside the revision is the diff this work would land as: every
+# change since it forked from upstream, working tree included. With no upstream
+# to compare against, the fork point collapses to the current commit and the
+# same expression degrades to "just my uncommitted changes", identically for
+# git, Sapling and Mercurial. It measures the work, not the session — reopening
+# a branch tomorrow still shows the whole thing, which is what you want when
+# judging whether a change has grown too big to review.
 # ---------------------------------------------------------------------------
 
-# Count untracked lines: git and sl diffs both ignore untracked files, but a
-# brand-new file is exactly the kind of work this number exists to measure.
-# Capped at 200 files: reading an unbounded tree costs more than the accuracy is
-# worth. Listing is cheap and stays exact, so only the reading is capped.
+# Count untracked lines. Neither git nor hg reports untracked files in a diff,
+# but a brand-new file is exactly the kind of work this number exists to
+# measure. Capped at 200 files: reading an unbounded tree costs more than the
+# accuracy is worth. Listing stays exact, so only the reading is capped.
 NEWLINES=0; TRUNC=""
-count_new() {
-  local new=$1
+count_new() { # repository root, then newline-separated paths
+  local root=$1 new=$2
   [ -z "$new" ] && return
-  NEWLINES=$(echo "$new" | head -200 | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' ')
-  # Past the cap the total is a floor, not a count. Say so, loudly — a number
-  # that is silently 9x low is worse than no number.
+  # Both tools report paths relative to the repository *root*, while this
+  # process's working directory is wherever the harness launched it. Read them
+  # from the root or every file silently misses and the count comes out zero.
+  NEWLINES=$(echo "$new" | head -200 | tr '\n' '\0' \
+    | (cd "$root" 2>/dev/null && xargs -0 cat 2>/dev/null) | wc -l | tr -d ' ')
+  # Past the cap the total is a floor, not a count. Say so, loudly: a number
+  # that is silently 9x low is worse than no number at all.
   [ "$(echo "$new" | wc -l | tr -d ' ')" -gt 200 ] && TRUNC=" ${YEL}(!!)${R}"
-}
-
-# --no-optional-locks keeps a status line that renders on every keystroke from
-# fighting a real git command for the index lock.
-vcs_git() {
-  local branch base from stat a d
-  g() { git --no-optional-locks -C "$PHYS" "$@" 2>/dev/null; }
-  branch=$(g branch --show-current)
-  [ -z "$branch" ] && return
-  base=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD)
-  from=$(g merge-base HEAD "${base:-origin/main}")
-  stat=$(g diff --shortstat "${from:-HEAD}")
-  a=$(echo "$stat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
-  d=$(echo "$stat" | grep -oE '[0-9]+ deletion'  | grep -oE '[0-9]+')
-  count_new "$(g ls-files --others --exclude-standard)"
-  a=$((${a:-0} + NEWLINES))
-  emit_vcs "$branch" "$a" "${d:-0}"
-}
-
-# Some Sapling builds mandate --reason on every invocation; stock Sapling has no
-# such flag and exits non-zero on it. Try the annotated form and fall back to the
-# plain one. Unlike a cached capability probe, this re-decides every refresh, so
-# it cannot get stuck on a wrong answer recorded during a transient failure.
-#
-# --cwd is not optional: without it sl resolves the repo from the *process* cwd,
-# which is whatever the harness happened to launch us in, and aborts outright
-# with "not inside a repository" whenever that differs from the reported dir.
-s() {
-  local why=$1; shift
-  TO 6 sl --cwd "$PHYS" "$@" --reason "$why" 2>/dev/null \
-    || TO 6 sl --cwd "$PHYS" "$@" 2>/dev/null
-}
-
-vcs_sl() {
-  local label base stat a d
-  # Label, in descending order of how much it tells you: an active bookmark,
-  # else the review-diff id — but only on a draft commit, since a landed public
-  # commit still carries one and showing it reads as if the work were still in
-  # flight — else the short hash. Not every Sapling build knows the phabdiff
-  # keyword, and those fail to parse the template, so fall back to a portable
-  # one rather than losing the whole segment.
-  label=$(s 'render statusline revision label - sl help log' log -r . \
-    -T '{ifeq(bookmarks,"","{ifeq(phase,"public","{node|short}","{ifeq(phabdiff,"","{node|short}","{phabdiff}")}")}","{bookmarks}")}')
-  [ -z "$label" ] && label=$(s 'render statusline revision label - sl help log' \
-    log -r . -T '{ifeq(bookmarks,"","{node|short}","{bookmarks}")}')
-  [ -z "$label" ] && return
-  # The Sapling analog of git merge-base: the newest public ancestor is where
-  # this draft stack forks from upstream, so diffing the working copy against it
-  # covers the whole stack plus pending edits in one pass.
-  base=$(s 'find stack base for statusline - sl help log' \
-    log -r 'max(::. & public())' -T '{node|short}')
-  stat=$(s 'measure work in flight for statusline - sl help diff' \
-    diff --stat -r "${base:-.}" | tail -1)
-  a=$(echo "$stat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
-  d=$(echo "$stat" | grep -oE '[0-9]+ deletion'  | grep -oE '[0-9]+')
-  count_new "$(s 'count untracked files for statusline - sl help status' status -u -n)"
-  a=$((${a:-0} + NEWLINES))
-  emit_vcs "$label" "$a" "${d:-0}"
 }
 
 # Nothing changed yet: show the revision alone rather than a hollow +0/-0.
@@ -185,32 +165,109 @@ emit_vcs() {
   if [ "${2:-0}" -gt 0 ] || [ "${3:-0}" -gt 0 ]; then
     seg="${seg} ${DIM}+${2}/-${3}${R}${TRUNC}"
   fi
-  printf ' |  %s' "$seg"
+  printf ' | %s %s' "$I_VCS" "$seg"
+}
+
+shortstat() { # "N files changed, A insertions(+), D deletions(-)" -> A and D
+  A=$(echo "$1" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+  D=$(echo "$1" | grep -oE '[0-9]+ deletion'  | grep -oE '[0-9]+')
+}
+
+# --no-optional-locks keeps a status line that renders on every keystroke from
+# fighting a real git command for the index lock.
+vcs_git() {
+  local branch base from
+  g() { git --no-optional-locks -C "$PHYS" "$@" 2>/dev/null; }
+  branch=$(g branch --show-current)
+  [ -z "$branch" ] && return
+  base=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  from=$(g merge-base HEAD "${base:-origin/main}")
+  shortstat "$(g diff --shortstat "${from:-HEAD}")"
+  count_new "$(g rev-parse --show-toplevel)" "$(g ls-files --others --exclude-standard)"
+  emit_vcs "$branch" "$((${A:-0} + NEWLINES))" "${D:-0}"
+}
+
+# Sapling and Mercurial share this command surface: --cwd, `log -r REV -T TPL`,
+# `diff --stat -r REV`, `status -u -n`, and the revsets below are all standard
+# in both. --cwd is not optional: without it the tool resolves the repository
+# from the *process* working directory, which is whatever the harness happened
+# to launch us in, and aborts outright when that differs from the reported one.
+v() {
+  if [ -n "$STATUSLINE_VCS_REASON" ]; then
+    TO 6 "$VCS_BIN" --cwd "$PHYS" "$@" --reason 'claude-code status line' 2>/dev/null
+  else
+    TO 6 "$VCS_BIN" --cwd "$PHYS" "$@" 2>/dev/null
+  fi
+}
+
+TPL_PLAIN='{ifeq(bookmarks,"","{node|short}","{bookmarks}")}'
+# Prefers an active bookmark; else the code-review id, but only on a draft
+# commit, since a landed commit still carries one and showing it would read as
+# if the work were still in flight; else the short hash.
+TPL_RICH='{ifeq(bookmarks,"","{ifeq(phase,"public","{node|short}","{ifeq(phabdiff,"","{node|short}","{phabdiff}")}")}","{bookmarks}")}'
+
+# {phabdiff} is an extension keyword that some Sapling deployments add and that
+# upstream Sapling and Mercurial fail to parse. Probe once and remember, so the
+# common path stays at one process per query instead of a failed call plus a
+# retry on every refresh. Keyed on the binary and its mtime, so an upgrade or a
+# move to a different host re-probes rather than trusting a stale answer.
+label_tpl() {
+  local f
+  [ -n "$STATUSLINE_LABEL_TPL" ] && { printf '%s' "$STATUSLINE_LABEL_TPL"; return; }
+  f="$CACHE_DIR/tpl.$(printf '%s %s' "$VCS_BIN" "$(mtime "$VCS_BIN")" | cksum | cut -d' ' -f1)"
+  if [ ! -f "$f" ]; then
+    if v log -r . -T '{phabdiff}' >/dev/null 2>&1
+      then printf '%s' "$TPL_RICH"  > "$f"
+      else printf '%s' "$TPL_PLAIN" > "$f"
+    fi
+  fi
+  cat "$f"
+}
+
+vcs_hg() {
+  local label base
+  label=$(v log -r . -T "$(label_tpl)")
+  [ -z "$label" ] && return
+  # The analog of git's merge-base: the newest public ancestor is where this
+  # stack of drafts forks from upstream, so diffing the working copy against it
+  # covers the whole stack plus pending edits in one pass. A repository with no
+  # public commits at all yields nothing, and the base collapses to the current
+  # commit — the same degradation as git's merge-base fallback.
+  base=$(v log -r 'max(::. & public())' -T '{node|short}')
+  shortstat "$(v diff --stat -r "${base:-.}" | tail -1)"
+  count_new "$(v root)" "$(v status -u -n)"
+  emit_vcs "$label" "$((${A:-0} + NEWLINES))" "${D:-0}"
 }
 
 vcs_segment() {
   local d="$PHYS"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
     # Sapling writes .sl in a fresh clone but keeps .hg in checkouts made before
-    # the rename, so both mean the same thing and both have to be checked.
-    [ -e "$d/.hg" ] || [ -e "$d/.sl" ] && { vcs_sl; return; }
+    # the rename, and Mercurial always uses .hg, so all three mean "not git".
+    if [ -e "$d/.hg" ] || [ -e "$d/.sl" ]; then
+      VCS_BIN=$(command -v sl || command -v hg) || return
+      vcs_hg; return
+    fi
     [ -e "$d/.git" ] && { vcs_git; return; }
     d="${d%/*}"
   done
 }
 
 # Serve the last known segment instantly and refresh behind it. A cold cache
-# costs one render with no VCS segment, which then fills itself in — cheaper
-# than making every keystroke wait on a slow or virtualised filesystem. The
+# costs one render with no repository segment, which then fills itself in —
+# cheaper than making every keystroke wait on a network-backed filesystem. The
 # refresh must not inherit the captured stdout, or the harness blocks waiting
 # for that pipe to close.
 CACHE_DIR="${TMPDIR:-/tmp}/claude-statusline.$(id -u)"
 mkdir -p "$CACHE_DIR" 2>/dev/null
-# Key on the resolved path, so two routes to the same directory share one entry.
-CF="$CACHE_DIR/vcs.$(printf '%s' "$PHYS" | cksum | cut -d' ' -f1)"
+# Key on the resolved path, so two routes to one directory share an entry. The
+# icon setting is part of the key because what gets cached is the *rendered*
+# segment, glyphs included, so flipping the setting must not serve back a
+# segment drawn in the other alphabet.
+CF="$CACHE_DIR/vcs.$(printf '%s %s' "$PHYS" "$STATUSLINE_ICONS" | cksum | cut -d' ' -f1)"
 VCS=""
 [ -f "$CF" ] && VCS=$(cat "$CF" 2>/dev/null)
-if [ $((NOW - $(mtime "$CF"))) -ge 2 ]; then
+if [ $((NOW - $(mtime "$CF"))) -ge "$STATUSLINE_TTL" ]; then
   LOCK="$CF.lock"
   # Reap a lock orphaned by a refresh that died, or this wedges permanently.
   [ -d "$LOCK" ] && [ $((NOW - $(mtime "$LOCK"))) -ge 60 ] && rmdir "$LOCK" 2>/dev/null
@@ -225,14 +282,12 @@ if [ "$PCT" -ge 90 ]; then C="$RED"
 elif [ "$PCT" -ge 70 ]; then C="$GOLD"
 else C="$GRN"; fi
 
-# Build the bar by concatenating the multibyte glyphs directly. Do NOT use
-# `tr ' ' '█'` — GNU tr is byte-oriented and keeps only the leading byte of each
-# 3-byte block, producing invalid UTF-8 that renders as replacement diamonds.
 # Round rather than floor, so a bar at 78% shows 8 blocks and not 7.
 FILLED=$(((PCT + 5) / 10)); [ "$FILLED" -gt 10 ] && FILLED=10; EMPTY=$((10 - FILLED))
-BAR=""
-for ((i = 0; i < FILLED; i++)); do BAR="${BAR}█"; done
-for ((i = 0; i < EMPTY; i++)); do BAR="${BAR}░"; done
+BAR="$B_OPEN"
+for ((i = 0; i < FILLED; i++)); do BAR="${BAR}${B_FULL}"; done
+for ((i = 0; i < EMPTY;  i++)); do BAR="${BAR}${B_EMPTY}"; done
+BAR="${BAR}${B_CLOSE}"
 
 fmt_left() { # seconds remaining -> single coarsest unit, e.g. 2d / 1h / 47m
   local s=$1
@@ -243,11 +298,11 @@ fmt_left() { # seconds remaining -> single coarsest unit, e.g. 2d / 1h / 47m
   else printf '%dm' "$m"; fi
 }
 
-# Subscription quota. Claude Code only sends .rate_limits on subscription auth
-# (Max/Pro), so on an API key the whole segment self-hides. Shown as consumed,
-# the way the API reports it: 0% on a fresh window, 100% when exhausted, so it
-# counts up to match the context bar beside it. Time math stays in bash/jq on
-# purpose — `date -d` (GNU) and `date -r` (BSD) are incompatible.
+# Subscription quota. The host only sends .rate_limits on subscription auth, so
+# on an API key the whole segment self-hides. Shown as consumed, the way the API
+# reports it: 0% on a fresh window, 100% when exhausted, so it counts up to
+# match the context bar beside it. Time math stays in bash and jq on purpose —
+# `date -d` (GNU) and `date -r` (BSD) are mutually incompatible.
 quota_seg() { # used_pct, resets_at(epoch), fallback_label
   local used=$1 reset=$2 label=$3 col tail
   [ -z "$used" ] && return
@@ -266,18 +321,13 @@ QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
 # Prompt cache: time left before the cached prefix goes cold. Rides in the
 # context group — how full this conversation is, and how long it stays cached,
 # are the same subject, and the flame keeps the two numbers apart without a
-# separator between them. A cold cache has no countdown, so it disappears rather
-# than reporting its own absence.
-#
-# 󰈸 is nf-md-fire (U+F0238), a nerd-font glyph rather than 🔥 or ⚡ on purpose:
-# those are emoji presentation, so the terminal paints them its own color and
-# ignores the dim. Private-use glyphs are plain outlines that take the color you
-# give them, the same way the  branch icon does.
+# separator between them. A cold cache has no countdown to show, so it
+# disappears rather than reporting its own absence.
 CACHE=""
-[ -n "$CACHE_EXP" ] && CACHE=" 󰈸$(fmt_left $((CACHE_EXP - NOW)))"
+[ -n "$CACHE_EXP" ] && CACHE=" ${I_FIRE}$(fmt_left $((CACHE_EXP - NOW)))"
 
 # Groups run left to right by increasing time horizon: the working tree right
-# now, then this conversation (how full, how long cached), then this session
+# now, then this conversation (how full, how long cached), then this session's
 # spend, then the quota windows measured in hours and days. Cost and elapsed
 # share a group because both are session totals that only count up.
 echo -e "[$MODEL] ${DIM}${DIR}${R}${VCS} | ${C}${BAR}${R} ${PCT}%${CACHE} | ${COST} ${MINS}m${SECS}s${QUOTA}"
