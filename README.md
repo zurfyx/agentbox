@@ -196,10 +196,19 @@ seconds**, not an ISO string (Claude Code has a separate code path that emits IS
 Claude Code only sends `.rate_limits` on subscription auth (Max/Pro). On an API
 key the whole segment self-hides, so the script is safe to use either way.
 
-**Editing it:** `install.sh` copies this repo's `statusline.sh` over
-`~/.claude/statusline.sh` **unconditionally** on every install, so edits made
-directly to `~/.claude/statusline.sh` are silently reverted on the next `make
-install` / rebuild. Edit `statusline.sh` *here*, then re-run `make install`.
+**Where it lives:** the script isn't vendored here. It's maintained in
+[zurfyx/dotfiles](https://github.com/zurfyx/dotfiles/blob/main/dot_claude/executable_statusline.sh),
+which installs the same file to the *host's* `~/.claude`; `install.sh` fetches it
+from there so the container home and the host home stay on one copy instead of
+two that drift. Edit it in dotfiles, then re-run `make install` — edits made
+directly to `~/.agentbox/.claude/statusline.sh` are overwritten on the next
+install.
+
+That one step needs network. If the fetch fails, `install.sh` keeps whatever copy
+is already installed; on a fresh machine with nothing to fall back on it skips
+the status line and leaves it unregistered, rather than pointing Claude at a
+command that isn't there. Set `STATUSLINE_URL` to install from a fork, or from a
+local path with `file://`.
 
 ## Make targets
 
