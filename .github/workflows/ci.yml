@@ -58,13 +58,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install zsh
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zsh
+          # The runner's apt mirrors fail often enough that an unretried
+          # `apt-get update` is a routine red build ("Some index files failed to
+          # download", exit 100 — hit on this workflow's first run). zsh is the
+          # only package CI needs, and an unrelated PR should not go red for a
+          # mirror hiccup, so retry before giving up.
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::apt-get failed to install zsh after 3 attempts"
+              exit 1
+            fi
+            echo "apt-get attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 15))
+          done
           zsh --version
 
       - name: Install pinned ShellCheck
@@ -173,14 +187,28 @@ jobs:
           - os: macos-latest
             bash: bash 3.2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install zsh (ubuntu)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zsh
+          # The runner's apt mirrors fail often enough that an unretried
+          # `apt-get update` is a routine red build ("Some index files failed to
+          # download", exit 100 — hit on this workflow's first run). zsh is the
+          # only package CI needs, and an unrelated PR should not go red for a
+          # mirror hiccup, so retry before giving up.
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::apt-get failed to install zsh after 3 attempts"
+              exit 1
+            fi
+            echo "apt-get attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 15))
+          done
 
       - name: Force /bin/bash 3.2 onto PATH (macOS)
         if: runner.os == 'macOS'
@@ -339,7 +367,7 @@ jobs:
     outputs:
       docker: ${{ steps.filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Which paths changed
@@ -381,7 +409,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
