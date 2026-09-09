@@ -75,7 +75,12 @@ test_case "happy path renders model / dir / bar / cost / elapsed" case_happy_pat
 
 case_cost_and_elapsed_formatting() {
   skip_unless jq "needs jq"
-  run_sl "$(base_json M /nonexistent/d 0 0.005 61000)"
+  # 0.006, not 0.005. An exact .005 is a representational tie, and printf
+  # breaks it by architecture: x86_64 bash converts through 80-bit long double
+  # and rounds it down to $0.00, while arm64 and macOS round up to $0.01. The
+  # claim here is "cost is formatted to 2dp", not "halfway values round a
+  # particular way", so do not sit the assertion on the tie.
+  run_sl "$(base_json M /nonexistent/d 0 0.006 61000)"
   assert_contains "$(plain "$STDOUT")" '$0.01 1m1s' "cost rounds to 2dp, 61s is 1m1s"
   run_sl "$(base_json M /nonexistent/d 0 1234.5 59999)"
   assert_contains "$(plain "$STDOUT")" '$1234.50 0m59s' "no thousands separator; sub-minute is 0mNNs"

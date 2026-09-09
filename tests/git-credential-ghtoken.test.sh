@@ -155,7 +155,8 @@ case_token_with_awkward_bytes() {
       served_is "$tok" "token [$tok] under $s"
     done
     # A tab, which word-splitting would turn into a single space.
-    export GH_TOKEN="$(printf 'a\tb')"
+    GH_TOKEN="$(printf 'a\tb')"
+    export GH_TOKEN
     request https github.com
     run_helper "$s" get "$REQ"
     served_is "$(printf 'a\tb')" "a tab inside the token under $s"
