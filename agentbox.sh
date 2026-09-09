@@ -3,8 +3,10 @@
 # Source this from ~/.zshrc:  source ~/Code/agentbox/agentbox.sh
 #
 # Commands:
-#   agentbox claude [args...]    personal Claude Code
-#   agentbox codex  [args...]    personal Codex
+#   agentbox [args...]           personal Claude Code (claude is the default mode)
+#   agentbox claude  [args...]   same, spelled out
+#   agentbox clauded [args...]   Claude Code with --dangerously-skip-permissions
+#   agentbox codex   [args...]   personal Codex
 #
 # Isolation model:
 #   * Personal config/login lives in $AGENTBOX_HOME (default ~/.agentbox),
@@ -101,12 +103,29 @@ _agentbox_run() {
     "$AGENTBOX_IMAGE" "$@"
 }
 
-# Entry point: agentbox {claude|codex} [args...]
+# Entry point: agentbox [claude|clauded|codex] [args...]
+# `claude` is the default mode: anything that isn't a known subcommand is treated
+# as arguments to Claude Code, so `agentbox --resume` / `agentbox "fix bug"` work.
+# Extra args are always appended after the agent's own flags.
 agentbox() {
-  local sub="${1:-}"; [ "$#" -gt 0 ] && shift
+  local sub=claude
+  case "${1:-}" in
+    claude | clauded | codex) sub="$1"; shift ;;
+    help | -h | --help)
+      cat >&2 <<'USAGE'
+usage: agentbox [claude|clauded|codex] [args...]
+
+  agentbox [args...]           Claude Code (default mode)
+  agentbox claude  [args...]   same, spelled out
+  agentbox clauded [args...]   Claude Code + --dangerously-skip-permissions
+  agentbox codex   [args...]   Codex + --dangerously-bypass-approvals-and-sandbox
+USAGE
+      return 0
+      ;;
+  esac
   case "$sub" in
-    claude) _agentbox_run claude claude --dangerously-skip-permissions "$@" ;;
-    codex)  _agentbox_run codex  codex  --dangerously-bypass-approvals-and-sandbox "$@" ;;
-    *) echo "usage: agentbox {claude|codex} [args...]" >&2; return 2 ;;
+    claude)  _agentbox_run claude claude "$@" ;;
+    clauded) _agentbox_run claude claude --dangerously-skip-permissions "$@" ;;
+    codex)   _agentbox_run codex  codex  --dangerously-bypass-approvals-and-sandbox "$@" ;;
   esac
 }

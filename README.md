@@ -40,11 +40,20 @@ source ~/.zshrc
 ## Usage
 
 ```sh
-agentbox claude              # personal Claude Code in the current directory
+agentbox                     # personal Claude Code in the current directory
+agentbox "fix bug"           # claude is the default mode — args pass straight through
+agentbox --resume
+agentbox claude --resume     # same thing, spelled out
+agentbox clauded             # Claude Code with --dangerously-skip-permissions
+agentbox clauded --resume    # extra args still work on top of the bundled flag
 agentbox codex               # personal Codex in the current directory
-agentbox claude "fix bug"
-agentbox claude --resume
 ```
+
+`claude` is the default mode: any argument that isn't a known subcommand
+(`claude`, `clauded`, `codex`) is handed to Claude Code as-is. `clauded` is the
+same launch with `--dangerously-skip-permissions` bundled in, so you opt into
+skipping permission prompts by name rather than by default. `agentbox help`
+prints the summary.
 
 First run of each prompts you to log in with your **personal** account:
 
@@ -76,7 +85,7 @@ background auto-update can't work (the image sets `DISABLE_AUTOUPDATER=1` to
 silence it). Updating means rebuilding the image, and the launcher does that for
 you automatically.
 
-**Auto-update on launch (default).** When you run `agentbox claude` / `codex`,
+**Auto-update on launch (default).** When you run `agentbox` / `codex`,
 the launcher checks — at most once a day — whether a newer Claude or Codex has
 been published, and if so rebuilds the image before starting (reusing cached
 layers, so only the changed agent refetches). It's silent when you're current,
@@ -84,7 +93,7 @@ skips gracefully when offline, and never blocks the launch on failure. Tune or
 turn it off:
 
 ```sh
-AGENTBOX_AUTO_UPDATE=0 agentbox claude          # skip the check this run
+AGENTBOX_AUTO_UPDATE=0 agentbox                 # skip the check this run
 export AGENTBOX_UPDATE_INTERVAL_DAYS=7          # check weekly instead of daily
 ```
 
@@ -130,9 +139,20 @@ One-time setup (run on the Mac):
 ```sh
 # Enable Remote Login: System Settings -> General -> Sharing -> Remote Login
 #   (or: sudo systemsetup -setremotelogin on)
-# "Allow full disk access for remote users" is NOT needed.
+# "Allow full disk access for remote users" is not needed for running commands,
+# but WITHOUT it, listing TCC-protected dirs (~/Desktop, ~/Documents,
+# ~/Downloads) over ssh hangs forever with no error -- macOS blocks the
+# enumeration on a consent dialog that can never be shown to an ssh session.
+# Exact-path file reads/writes/scp still work. Enable it if the agent will
+# browse those dirs remotely.
 make host-bridge          # generates a dedicated key, authorizes it, verifies
 ```
+
+**Caveats for any Mac reached over ssh** (this host or another machine):
+listing TCC-protected dirs hangs without full disk access (above), and macOS
+ships no GNU `timeout` — so always bound remote calls from the *client* side
+(`timeout 30 ssh …`); a blocked remote call otherwise hangs the session
+indefinitely.
 
 Then, from inside an agentbox session:
 
@@ -189,6 +209,7 @@ make rebuild    Rebuild without cache
 make update     Update agents to latest (rebuild; the only update path)
 make install    Add the shell functions to ~/.zshrc
 make run        Build + run Claude in the current directory
+make run-dangerous  Build + run Claude with --dangerously-skip-permissions
 make run-codex  Build + run Codex in the current directory
 make shell      Bash shell inside the image (debug)
 make host-bridge  Set up the container->macOS-host command bridge (onhost)

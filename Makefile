@@ -9,7 +9,7 @@ DOCKER_ARGS = --rm -it \
   -v "$(HOME_DIR)":/home/node -v /Users:/Users -v /Volumes:/Volumes -v /tmp:/tmp -w "$(PWD)" \
   -e GH_TOKEN -e AGENTBOX_HOST=host.docker.internal -e AGENTBOX_HOST_USER="$$USER"
 
-.PHONY: build rebuild update install run run-codex shell host-bridge clean help
+.PHONY: build rebuild update install run run-dangerous run-codex shell host-bridge clean help
 
 build: ## Build the image (pin: make build VERSION=1.2.3 CODEX_VERSION=0.144.3)
 	docker build --build-arg CLAUDE_VERSION=$(VERSION) --build-arg CODEX_VERSION=$(CODEX_VERSION) -t $(IMAGE) .
@@ -24,6 +24,10 @@ install: ## Add the shell functions to ~/.zshrc
 	./install.sh
 
 run: build ## Build then run Claude in the current dir (parity with agentbox claude)
+	mkdir -p "$(HOME_DIR)"
+	$(DOCKER_ENV) docker run $(DOCKER_ARGS) "$(IMAGE)" claude
+
+run-dangerous: build ## Same, with --dangerously-skip-permissions (parity with agentbox clauded)
 	mkdir -p "$(HOME_DIR)"
 	$(DOCKER_ENV) docker run $(DOCKER_ARGS) "$(IMAGE)" claude --dangerously-skip-permissions
 
@@ -42,4 +46,4 @@ clean: ## Remove the image (login/config in $(HOME_DIR) is kept)
 	-docker rmi $(IMAGE)
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
