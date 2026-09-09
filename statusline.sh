@@ -19,6 +19,10 @@ DURATION_MS=$(echo "$input" | jq -r '.cost.total_duration_ms // 0')
 MINS=$((DURATION_MS / 60000))
 SECS=$(((DURATION_MS % 60000) / 1000))
 
+# Palette. Defined up here because the git block below already needs it — a
+# segment that emits a color without a reset bleeds into the next separator.
+DIM='\033[2m'; R='\033[0m'; YEL='\033[33m'
+
 # Git branch (if inside a repo), followed by the size of the work in flight.
 #
 # That size is the diff this branch would land as a PR: everything since it
@@ -40,15 +44,21 @@ if [ -n "$BRANCH" ]; then
   D=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
   # git diff can't see untracked files, but a brand-new file is exactly the
   # kind of work this number exists to measure — so count its lines too.
-  # Capped at 200 files: past that the count is noise, and cat'ing an unbounded
-  # tree on every render is not worth the accuracy.
-  NEW=$(g ls-files --others --exclude-standard | head -200)
+  # Capped at 200 files: reading an unbounded tree on every render costs more
+  # than the accuracy is worth (measured 2x on a 2000-file tree). Listing the
+  # files is cheap; only the reading is capped, so the count of how many there
+  # are stays exact.
+  TRUNC=""
+  NEW=$(g ls-files --others --exclude-standard)
   if [ -n "$NEW" ]; then
-    NEWLINES=$(echo "$NEW" | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' ')
+    NEWLINES=$(echo "$NEW" | head -200 | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' ')
     A=$((${A:-0} + NEWLINES))
+    # Past the cap the total is a floor, not a count. Say so, loudly — a number
+    # that is silently 9x low is worse than no number.
+    [ "$(echo "$NEW" | wc -l | tr -d ' ')" -gt 200 ] && TRUNC=" ${YEL}(!!)${R}"
   fi
   # Nothing changed yet: show the branch alone rather than a hollow +0/-0.
-  [ -n "$A$D" ] && BRANCH="${BRANCH} ${DIM}+${A:-0}/-${D:-0}${R}"
+  [ -n "$A$D" ] && BRANCH="${BRANCH} ${DIM}+${A:-0}/-${D:-0}${R}${TRUNC}"
   BRANCH=" |  ${BRANCH}"
 fi
 
@@ -56,7 +66,6 @@ fi
 if [ "$PCT" -ge 90 ]; then C='\033[31m'
 elif [ "$PCT" -ge 70 ]; then C='\033[33m'
 else C='\033[32m'; fi
-DIM='\033[2m'; R='\033[0m'
 
 # Build the bar by concatenating the multibyte glyphs directly. Do NOT use
 # `tr ' ' '█'` — GNU tr (Linux) is byte-oriented and mangles the 3-byte
@@ -91,7 +100,7 @@ quota_seg() { # used_pct, resets_at(epoch), fallback_label
   # exhausted — matching the context bar next to it, which also counts up.
   used=$(printf '%.0f' "$used")
   if [ "$used" -ge 90 ]; then col='\033[31m'
-  elif [ "$used" -ge 70 ]; then col='\033[33m'
+  elif [ "$used" -ge 70 ]; then col="$YEL"
   else col="$DIM"; fi
   # Prefer a live countdown; fall back to the static window label if the
   # server didn't send a reset time.
