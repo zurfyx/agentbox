@@ -60,25 +60,31 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install zsh
+      - name: Ensure zsh
         run: |
           set -euo pipefail
-          # The runner's apt mirrors fail often enough that an unretried
-          # `apt-get update` is a routine red build ("Some index files failed to
-          # download", exit 100 — hit on this workflow's first run). zsh is the
-          # only package CI needs, and an unrelated PR should not go red for a
-          # mirror hiccup, so retry before giving up.
-          for attempt in 1 2 3; do
-            if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "::error::apt-get failed to install zsh after 3 attempts"
-              exit 1
-            fi
-            echo "apt-get attempt $attempt failed; retrying" >&2
-            sleep $((attempt * 15))
-          done
+          # The ubuntu runner image already ships zsh, so this is normally just
+          # an assertion. Reaching for apt when the tool is already present is
+          # what actually broke CI here: `apt-get update` against the runner
+          # mirrors failed persistently (exit 100, "Some index files failed to
+          # download") and took lint and test down with it before either ran a
+          # single check. Install only if it is genuinely missing, and still
+          # fail loudly if that does not work -- a missing zsh means the
+          # launcher cases cannot run, which must never pass quietly.
+          if ! command -v zsh >/dev/null 2>&1; then
+            echo "zsh is not preinstalled on this image; falling back to apt" >&2
+            for attempt in 1 2 3; do
+              if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error::zsh is missing and apt-get failed after 3 attempts"
+                exit 1
+              fi
+              echo "apt-get attempt $attempt failed; retrying" >&2
+              sleep $((attempt * 15))
+            done
+          fi
           zsh --version
 
       - name: Install pinned ShellCheck
@@ -189,26 +195,33 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install zsh (ubuntu)
+      - name: Ensure zsh (ubuntu)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          # The runner's apt mirrors fail often enough that an unretried
-          # `apt-get update` is a routine red build ("Some index files failed to
-          # download", exit 100 — hit on this workflow's first run). zsh is the
-          # only package CI needs, and an unrelated PR should not go red for a
-          # mirror hiccup, so retry before giving up.
-          for attempt in 1 2 3; do
-            if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "::error::apt-get failed to install zsh after 3 attempts"
-              exit 1
-            fi
-            echo "apt-get attempt $attempt failed; retrying" >&2
-            sleep $((attempt * 15))
-          done
+          # The ubuntu runner image already ships zsh, so this is normally just
+          # an assertion. Reaching for apt when the tool is already present is
+          # what actually broke CI here: `apt-get update` against the runner
+          # mirrors failed persistently (exit 100, "Some index files failed to
+          # download") and took lint and test down with it before either ran a
+          # single check. Install only if it is genuinely missing, and still
+          # fail loudly if that does not work -- a missing zsh means the
+          # launcher cases cannot run, which must never pass quietly.
+          if ! command -v zsh >/dev/null 2>&1; then
+            echo "zsh is not preinstalled on this image; falling back to apt" >&2
+            for attempt in 1 2 3; do
+              if sudo apt-get update -qq && sudo apt-get install -y -qq zsh; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error::zsh is missing and apt-get failed after 3 attempts"
+                exit 1
+              fi
+              echo "apt-get attempt $attempt failed; retrying" >&2
+              sleep $((attempt * 15))
+            done
+          fi
+          zsh --version
 
       - name: Force /bin/bash 3.2 onto PATH (macOS)
         if: runner.os == 'macOS'
