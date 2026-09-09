@@ -132,7 +132,9 @@ if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .promp
   # presentation, so the terminal paints them its own color and ignores the
   # dim. Private-use glyphs are plain outlines that take the color you give
   # them, the same way the  branch icon does.
-  [ -n "$EXP" ] && CACHE=" ${DIM}󰈸$(fmt_left $((EXP - NOW)))${R}"
+  # Undimmed, to match the context percentage it now sits beside — the two
+  # numbers are one group, so they read as one weight.
+  [ -n "$EXP" ] && CACHE=" 󰈸$(fmt_left $((EXP - NOW)))"
 fi
 
 # Groups run left to right by increasing time horizon: the working tree right
