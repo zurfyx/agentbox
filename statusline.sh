@@ -8,28 +8,64 @@
 #        "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #   Requires: jq
 #
-# Shows: [model] dir | branch | context-usage bar + % | quota | prompt cache | cost | +added/-removed | elapsed
+# Shows: [model] dir | branch +added/-removed | context bar + % | quota | cost + elapsed | cache TTL
 input=$(cat)
 MODEL=$(echo "$input" | jq -r '.model.display_name')
 DIR_PATH=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
 DIR=$(basename "$DIR_PATH")
 PCT=$(echo "$input" | jq -r '(.context_window.used_percentage // 0) | round')
 COST=$(printf '$%.2f' "$(echo "$input" | jq -r '.cost.total_cost_usd // 0')")
-ADDED=$(echo "$input" | jq -r '.cost.total_lines_added // 0')
-REMOVED=$(echo "$input" | jq -r '.cost.total_lines_removed // 0')
 DURATION_MS=$(echo "$input" | jq -r '.cost.total_duration_ms // 0')
 MINS=$((DURATION_MS / 60000))
 SECS=$(((DURATION_MS % 60000) / 1000))
 
-# Git branch (if inside a repo)
-BRANCH=$(git -C "$DIR_PATH" branch --show-current 2>/dev/null)
-[ -n "$BRANCH" ] && BRANCH=" |  ${BRANCH}"
+# Palette. Defined up here because the git block below already needs it — a
+# segment that emits a color without a reset bleeds into the next separator.
+DIM='\033[2m'; R='\033[0m'; YEL='\033[33m'
+
+# Git branch (if inside a repo), followed by the size of the work in flight.
+#
+# That size is the diff this branch would land as a PR: everything since it
+# forked from the default branch, working tree included. On the default branch
+# the merge base *is* HEAD, so the same expression degrades to "just my
+# uncommitted changes" with no special case. It counts the work, not the
+# session — reopening a branch tomorrow still shows the whole thing, which is
+# what you want when judging whether a PR has grown too big.
+#
+# --no-optional-locks keeps a status line that renders on every keystroke from
+# fighting a real git command for the index lock.
+g() { git --no-optional-locks -C "$DIR_PATH" "$@" 2>/dev/null; }
+BRANCH=$(g branch --show-current)
+if [ -n "$BRANCH" ]; then
+  BASE=$(g symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  FROM=$(g merge-base HEAD "${BASE:-origin/main}")
+  STAT=$(g diff --shortstat "${FROM:-HEAD}")
+  A=$(echo "$STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+  D=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+  # git diff can't see untracked files, but a brand-new file is exactly the
+  # kind of work this number exists to measure — so count its lines too.
+  # Capped at 200 files: reading an unbounded tree on every render costs more
+  # than the accuracy is worth (measured 2x on a 2000-file tree). Listing the
+  # files is cheap; only the reading is capped, so the count of how many there
+  # are stays exact.
+  TRUNC=""
+  NEW=$(g ls-files --others --exclude-standard)
+  if [ -n "$NEW" ]; then
+    NEWLINES=$(echo "$NEW" | head -200 | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' ')
+    A=$((${A:-0} + NEWLINES))
+    # Past the cap the total is a floor, not a count. Say so, loudly — a number
+    # that is silently 9x low is worse than no number.
+    [ "$(echo "$NEW" | wc -l | tr -d ' ')" -gt 200 ] && TRUNC=" ${YEL}(!!)${R}"
+  fi
+  # Nothing changed yet: show the branch alone rather than a hollow +0/-0.
+  [ -n "$A$D" ] && BRANCH="${BRANCH} ${DIM}+${A:-0}/-${D:-0}${R}${TRUNC}"
+  BRANCH=" |  ${BRANCH}"
+fi
 
 # Color by context usage
 if [ "$PCT" -ge 90 ]; then C='\033[31m'
 elif [ "$PCT" -ge 70 ]; then C='\033[33m'
 else C='\033[32m'; fi
-DIM='\033[2m'; R='\033[0m'
 
 # Build the bar by concatenating the multibyte glyphs directly. Do NOT use
 # `tr ' ' '█'` — GNU tr (Linux) is byte-oriented and mangles the 3-byte
@@ -64,7 +100,7 @@ quota_seg() { # used_pct, resets_at(epoch), fallback_label
   # exhausted — matching the context bar next to it, which also counts up.
   used=$(printf '%.0f' "$used")
   if [ "$used" -ge 90 ]; then col='\033[31m'
-  elif [ "$used" -ge 70 ]; then col='\033[33m'
+  elif [ "$used" -ge 70 ]; then col="$YEL"
   else col="$DIM"; fi
   # Prefer a live countdown; fall back to the static window label if the
   # server didn't send a reset time.
@@ -75,33 +111,26 @@ quota_seg() { # used_pct, resets_at(epoch), fallback_label
 rl() { echo "$input" | jq -r "(.rate_limits.$1.$2 // empty) | if type==\"string\" then (sub(\"\\\\.[0-9]+\";\"\") | fromdateiso8601) else . end"; }
 FIVE=$(rl five_hour used_percentage);  FIVE_AT=$(rl five_hour resets_at)
 WEEK=$(rl seven_day used_percentage);  WEEK_AT=$(rl seven_day resets_at)
-# Prompt cache: time left before the cached prefix goes cold, as a bare "42m"
-# alongside the quota countdowns. The written TTL (5m/1h) isn't printed — the
-# countdown already implies it — and a cold prefix is just ❄, no word, which is
-# the only state that needs to catch the eye. Only sent after the first API
-# response, so the
-# segment self-hides before then. Gate on caching_observed, otherwise a provider
-# that never reports cache tokens renders as permanently cold. Read the booleans
-# with `== true` — jq's `//` treats `false` as absent.
+QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
+[ -n "$QUOTA" ] && QUOTA=" | ${QUOTA% }"
+
+# Prompt cache, trailing group: time left before the cached prefix goes cold.
+# Warm only — a cold cache has no countdown to show, so the group disappears
+# rather than reporting its own absence. Also absent before the first API
+# response, and whenever the provider reports no cache tokens at all (gate on
+# caching_observed, else a non-caching provider looks permanently cold). Read
+# the booleans with `== true` — jq's `//` treats `false` as absent.
 CACHE=""
-if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true')" = "true" ]; then
-  if [ "$(echo "$input" | jq -r '.prompt_cache.warm == true')" = "true" ]; then
-    EXP=$(echo "$input" | jq -r '.prompt_cache.expires_at // empty')
-    [ -n "$EXP" ] && CACHE="${DIM}$(fmt_left $((EXP - NOW)))${R}"
-  else
-    CACHE="\033[33m❄${R}"
-  fi
+if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .prompt_cache.warm == true')" = "true" ]; then
+  EXP=$(echo "$input" | jq -r '.prompt_cache.expires_at // empty')
+  # 󰈸 nf-md-fire (U+F0238): the cache is still hot for another N. It's a
+  # nerd-font glyph rather than 🔥 or ⚡ on purpose — those are emoji
+  # presentation, so the terminal paints them its own color and ignores the
+  # dim. Private-use glyphs are plain outlines that take the color you give
+  # them, the same way the  branch icon does.
+  [ -n "$EXP" ] && CACHE=" | ${DIM}󰈸$(fmt_left $((EXP - NOW)))${R}"
 fi
 
-rl() { echo "$input" | jq -r "(.rate_limits.$1.$2 // empty) | if type==\"string\" then (sub(\"\\\\.[0-9]+\";\"\") | fromdateiso8601) else . end"; }
-FIVE=$(rl five_hour used_percentage);  FIVE_AT=$(rl five_hour resets_at)
-WEEK=$(rl seven_day used_percentage);  WEEK_AT=$(rl seven_day resets_at)
-# Cache leads the same group as the quota timers — all three are "how long
-# until this resets", so they read as one cluster rather than three segments,
-# and the cache is the one that turns over fastest.
-QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
-QUOTA="${QUOTA% }"
-[ -n "$CACHE" ] && QUOTA="${CACHE}${QUOTA:+ $QUOTA}"
-[ -n "$QUOTA" ] && QUOTA=" | ${QUOTA}"
-
-echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} | ${DIM}+${ADDED}/-${REMOVED}${R} | ${MINS}m${SECS}s"
+# Cost and elapsed are one group: both are session totals that only count up.
+# The cache countdown keeps the last slot to itself.
+echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} ${MINS}m${SECS}s${CACHE}"
