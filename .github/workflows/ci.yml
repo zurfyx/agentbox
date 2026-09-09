@@ -1,0 +1,459 @@
+# agentbox CI — catch a broken script before it reaches the Mac.
+#
+# WHAT RUNS WHEN
+#   lint   + test    every push to main, every PR, manual, weekly.  ~1-2 min.
+#   docker           push to main, manual, weekly, and on PRs that touch
+#                    Dockerfile / git-credential-ghtoken / onhost / Makefile.
+#                    See the `changes` job for why it is filtered.
+#
+# HONESTY RULES (the point of this file)
+#   * Nothing is allowed to skip silently. Required tools are asserted, not
+#     probed; tests/run.sh already exits 1 when zero assertions ran; and the
+#     "no forbidden skips" step fails the build when a case skipped for a tool
+#     that must exist on that runner.
+#   * A known defect in a repo script is pinned with lib.sh's `xfail`, not
+#     deleted and not left red. It reports as a skip labelled "KNOWN BUG:",
+#     which the job summary lists on its own — and the moment the defect is
+#     fixed the assertion passes, which xfail reports as a FAILURE telling you
+#     to remove the marker. Green suite, visible bug, no rot.
+#   * macOS is the real target (bash 3.2, BSD stat/date, /bin/sh = bash in
+#     posix mode), so the macOS leg runs the suite under /bin/bash 3.2, not
+#     under the newer bash Homebrew puts on PATH.
+#   * No secrets. Nothing here needs a token; a fork PR gets the same result.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:17 UTC. Catches rot we did not cause: a new runner image, a
+    # new node:22-bookworm, a claude-code/codex release that fails to install.
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # bash (not sh) everywhere, with -o pipefail so `run.sh | tee` cannot
+    # hide a failure.
+    shell: bash
+
+env:
+  # Pinned so a runner-image refresh cannot change what lint means.
+  SHELLCHECK_VERSION: v0.10.0
+  SHELLCHECK_SHA256: 6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87
+
+jobs:
+  # ---------------------------------------------------------------- lint ----
+  lint:
+    name: lint (shellcheck + zsh -n)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh
+          zsh --version
+
+      - name: Install pinned ShellCheck
+        run: |
+          set -euo pipefail
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/shellcheck.tar.xz" "$url"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" "$RUNNER_TEMP/shellcheck"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/shellcheck" --version
+
+      # A file that nobody lints is worse than a file that lints badly, so the
+      # dialect lists below are checked for completeness before they are used.
+      - name: Every shell file is claimed by exactly one dialect
+        run: |
+          set -euo pipefail
+          claimed=$( { echo install.sh
+                       echo setup-host-bridge.sh
+                       echo statusline.sh
+                       echo onhost
+                       echo git-credential-ghtoken
+                       echo agentbox.sh
+                       git ls-files 'tests/*.sh'
+                     } | sort -u )
+          # Every tracked file that is a shell script: by extension, or by a
+          # #! line naming sh/bash/zsh.
+          found=$(git ls-files | while IFS= read -r f; do
+                    case $f in
+                      *.sh) printf '%s\n' "$f"; continue ;;
+                    esac
+                    case $(head -n 1 "$f" 2>/dev/null) in
+                      '#!'*sh) printf '%s\n' "$f" ;;
+                    esac
+                  done | sort -u)
+          missing=$(comm -13 <(printf '%s\n' "$claimed") <(printf '%s\n' "$found") || true)
+          if [ -n "$missing" ]; then
+            echo "::error::these shell files are not linted by any job; add them to ci.yml"
+            printf '  %s\n' $missing
+            exit 1
+          fi
+          stale=$(comm -23 <(printf '%s\n' "$claimed") <(printf '%s\n' "$found") || true)
+          if [ -n "$stale" ]; then
+            echo "::error::ci.yml lints files that no longer exist"
+            printf '  %s\n' $stale
+            exit 1
+          fi
+          printf 'linting %s shell files\n' "$(printf '%s\n' "$found" | wc -l | tr -d ' ')"
+
+      - name: shellcheck (bash dialect)
+        run: |
+          set -euo pipefail
+          shellcheck --severity=warning --shell=bash \
+            install.sh setup-host-bridge.sh statusline.sh tests/*.sh
+
+      - name: shellcheck (sh dialect)
+        run: |
+          set -euo pipefail
+          # onhost and git-credential-ghtoken are #!/bin/sh and run under
+          # dash-or-worse; checking them as bash would let bashisms through.
+          shellcheck --severity=warning --shell=sh onhost git-credential-ghtoken
+
+      - name: zsh -n agentbox.sh
+        run: |
+          set -euo pipefail
+          # agentbox.sh is zsh and ShellCheck cannot parse zsh at all (it has no
+          # zsh dialect) — so instead of pretending, we hand it to zsh itself.
+          # `zsh -n` parses without executing: it catches syntax errors, which
+          # is the class of breakage that would otherwise land on the Mac.
+          command -v zsh >/dev/null || { echo "::error::zsh missing on the lint runner"; exit 1; }
+          zsh -n agentbox.sh
+          echo "agentbox.sh parses under $(zsh --version)"
+
+      - name: shellcheckrc files agree
+        run: |
+          set -euo pipefail
+          # ShellCheck reads only the NEAREST .shellcheckrc (no merging), so
+          # tests/.shellcheckrc must repeat every repo-wide disable. Drift here
+          # would silently re-enable a rule for the main scripts only, or hide
+          # one in the tests.
+          missing=0
+          while IFS= read -r line; do
+            grep -qxF "$line" tests/.shellcheckrc || {
+              echo "::error::tests/.shellcheckrc is missing '$line' from .shellcheckrc"; missing=1; }
+          done < <(grep '^disable=' .shellcheckrc)
+          exit "$missing"
+
+  # ---------------------------------------------------------------- test ----
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.bash }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: modern bash 5. Fast, free, and catches "works only on 3.2".
+          - os: ubuntu-latest
+            bash: bash 5
+          # macOS: the platform this repo actually ships to. /bin/bash is Apple's
+          # 3.2.57 and /bin/sh is bash in posix mode. macos-latest also has a
+          # newer bash earlier on PATH, and run.sh spawns each test file with a
+          # bare `bash`, so a shim directory in front of PATH is what makes the
+          # whole suite — runner and children — run under 3.2.
+          - os: macos-latest
+            bash: bash 3.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh
+
+      - name: Force /bin/bash 3.2 onto PATH (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -sf /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >> "$GITHUB_PATH"
+
+      # Assert, never probe. A missing tool must be a red build, not a skip.
+      - name: Preflight — required tools present
+        run: |
+          set -euo pipefail
+          missing=0
+          # Every tool any test guards on, plus the ones run.sh/lib.sh need.
+          # python3: install.test.sh (install.sh pipes both config merges
+          # through it). make: onhost.test.sh's Makefile block.
+          for t in git jq zsh ssh awk sed make python3; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '  %-6s %s\n' "$t" "$(command -v "$t")"
+            else
+              echo "::error::required tool '$t' is not installed on ${{ matrix.os }}"
+              missing=1
+            fi
+          done
+          # statusline.test.sh's TZ=UTC regression case needs a real tz database
+          # to set a DST-active zone; skip_unless_file would otherwise hide the
+          # single most valuable case in that file behind a silent-looking skip.
+          for f in /usr/share/zoneinfo/Europe/Madrid; do
+            if [ -e "$f" ]; then
+              printf '  %-6s %s\n' tzdata "$f"
+            else
+              echo "::error::required file '$f' is missing on ${{ matrix.os }}"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          echo "  bash   $(command -v bash) — $(bash --version | head -n 1)"
+          echo "  /bin/sh -> $( (/bin/sh --version 2>/dev/null || echo 'posix sh') | head -n 1)"
+          if [ "${{ runner.os }}" = macOS ]; then
+            # If Apple ever stops shipping 3.2 at /bin/bash, this leg is no
+            # longer testing what it claims to test. Fail loudly instead.
+            case "$(bash --version | head -n 1)" in
+              *"version 3.2"*) echo "  -> suite will run under bash 3.2" ;;
+              *) echo "::error::expected bash 3.2 first on PATH, got: $(bash --version | head -n 1)"; exit 1 ;;
+            esac
+          fi
+
+      # Cheap parse-only checks with the platform's own shells. On macOS this is
+      # the one place bash-4-only syntax (mapfile, ${x,,}, declare -A) is caught
+      # before it reaches a real Mac; ShellCheck on Linux will not catch it.
+      - name: Syntax check with this platform's shells
+        run: |
+          set -euo pipefail
+          for f in install.sh setup-host-bridge.sh statusline.sh tests/lib.sh tests/run.sh tests/*.test.sh; do
+            bash -n "$f"
+          done
+          for f in onhost git-credential-ghtoken; do
+            /bin/sh -n "$f"
+          done
+          zsh -n agentbox.sh
+          echo "all files parse"
+
+      - name: Run the suite
+        id: suite
+        run: |
+          set -euo pipefail
+          ./tests/run.sh --no-color 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+
+      - name: No forbidden skips on this platform
+        # Runs even when the suite failed: a red suite plus a forbidden skip is
+        # two separate problems and both should be visible. Not run when the
+        # suite never started (a preflight failure already explains that).
+        if: always() && steps.suite.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          log=$RUNNER_TEMP/test-output.txt
+          [ -f "$log" ] || { echo "::error::the suite produced no output"; exit 1; }
+
+          # Tools that exist on this runner, so `skip_unless <tool>` firing for
+          # one of them means the suite quietly tested less than it claims.
+          # lib.sh writes exactly "needs <cmd>" into the skip message, and
+          # run.sh prints one "skip ..." line per skip.
+          required="git jq zsh ssh make python3"
+          if [ "${{ runner.os }}" = Linux ]; then
+            # docker is preinstalled on the ubuntu runner, so a docker-guarded
+            # case has no excuse there either.
+            required="$required docker"
+          fi
+          # Deliberately NOT required anywhere: shellcheck (the lint job owns
+          # it) and, on macOS, docker (no Docker daemon on macOS runners — that
+          # is what the `docker` job below is for).
+          #
+          # This check only classifies lib.sh's generated "needs <cmd>" skips.
+          # The other kind of skip the suite emits is an `xfail`: a KNOWN BUG in
+          # a repo script that the suite pins rather than fixes. Those are meant
+          # to be here, and they are surfaced separately in the job summary
+          # below so nobody has to expand a <details> to see them.
+
+          bad=0
+          for t in $required; do
+            if grep -E "^skip[[:space:]]" "$log" | grep -Eq "needs ${t}([^A-Za-z0-9_-]|$)"; then
+              echo "::error::a test skipped for missing '$t', but '$t' exists on ${{ matrix.os }}"
+              grep -E "^skip[[:space:]]" "$log" | grep -E "needs ${t}([^A-Za-z0-9_-]|$)" | sed 's/^/    /'
+              bad=1
+            fi
+          done
+
+          summary=$(grep -E '^[0-9]+ files, ' "$log" | tail -n 1 || true)
+          [ -n "$summary" ] || { echo "::error::no summary line — did run.sh die early?"; exit 1; }
+          skips=$(printf '%s\n' "$summary" | sed -n 's/.*, \([0-9][0-9]*\) skipped.*/\1/p')
+          known=$(grep -E "^skip[[:space:]]" "$log" | grep -c "KNOWN BUG:" || true)
+          {
+            echo "### ${{ matrix.os }} (${{ matrix.bash }})"
+            echo ''
+            echo '```'
+            printf '%s\n' "$summary"
+            echo '```'
+            if [ "${known:-0}" != 0 ]; then
+              echo ''
+              echo "**${known} assertion(s) pinned to a known bug in a repo script:**"
+              echo ''
+              echo '```'
+              grep -E "^skip[[:space:]]" "$log" | grep "KNOWN BUG:" |
+                sed 's/.*KNOWN BUG: //' | sort -u
+              echo '```'
+            fi
+            if [ "${skips:-0}" != 0 ]; then
+              echo ''
+              echo "<details><summary>all ${skips} skip(s)</summary>"
+              echo ''
+              echo '```'
+              grep -E "^skip[[:space:]]" "$log" || true
+              echo '```'
+              echo ''
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$bad"
+
+  # ------------------------------------------------------------- changes ----
+  # The docker job is the only slow, network-dependent part of CI: it runs
+  # `npm install -g @anthropic-ai/claude-code@latest`, which can go red for
+  # reasons that have nothing to do with the change under review. Blocking an
+  # unrelated PR on that would train people to merge past a red X, so on PRs it
+  # runs only when something that can actually change the image changed. It
+  # still runs unconditionally on main, on the weekly schedule and on demand,
+  # so an upstream break is never invisible — it just is not in the way.
+  #
+  # NOTE for branch protection: mark `lint` and `test` as required checks.
+  # Do NOT mark `docker` required — a skipped required check blocks a PR forever.
+  changes:
+    name: Detect image-relevant changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Which paths changed
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "not a pull request ($EVENT_NAME) -> building the image"
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git fetch --no-tags --quiet origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" 2>/dev/null; then
+            echo "::warning::could not fetch base ref '$BASE_REF' — building the image to be safe"
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only "origin/$BASE_REF...HEAD"); then
+            echo "::warning::could not diff against '$BASE_REF' — building the image to be safe"
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'changed files:\n%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -Eq '^(Dockerfile|git-credential-ghtoken|onhost|Makefile|\.github/workflows/ci\.yml)$'; then
+            echo "-> image-relevant change, building"
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "-> no image-relevant change, skipping the docker job"
+            echo "docker=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # -------------------------------------------------------------- docker ----
+  docker:
+    name: docker build + smoke
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: agentbox:ci
+          # GitHub's cache backend keeps the apt + npm layers between runs, so
+          # a Dockerfile-only PR is roughly a minute instead of four.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # The scheduled/manual run exists to catch upstream rot, and a cached
+          # `npm install -g ...@latest` layer would hide exactly that.
+          no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+      - name: Smoke test the image
+        run: |
+          set -uo pipefail
+          IMAGE=agentbox:ci
+          fails=0
+          check() { # check LABEL EXPECTED ACTUAL
+            if [ "$2" = "$3" ]; then
+              printf 'ok    %s = %s\n' "$1" "$3"
+            else
+              printf 'FAIL  %s\n        expected: %s\n        actual:   %s\n' "$1" "$2" "$3"
+              fails=$((fails + 1))
+            fi
+          }
+          check_ok() { # check_ok LABEL CMD...
+            local label=$1; shift
+            if out=$(docker run --rm "$IMAGE" "$@" 2>&1); then
+              printf 'ok    %s (%s)\n' "$label" "$(printf '%s' "$out" | head -n 1)"
+            else
+              printf 'FAIL  %s\n        %s\n' "$label" "$out"
+              fails=$((fails + 1))
+            fi
+          }
+
+          # Runs unprivileged as the base image's node user: claude and codex
+          # both refuse their --dangerously-* flags as root.
+          check 'uid'                  '1000'      "$(docker run --rm "$IMAGE" id -u)"
+          check 'user'                 'node'      "$(docker run --rm "$IMAGE" id -un)"
+          check 'WORKDIR'              '/workspace' "$(docker run --rm "$IMAGE" pwd)"
+          check 'DISABLE_AUTOUPDATER'  '1'         "$(docker run --rm "$IMAGE" sh -c 'printf %s "${DISABLE_AUTOUPDATER-}"')"
+
+          # Both agents must actually start, not merely be on disk.
+          check_ok 'claude --version' claude --version
+          check_ok 'codex --version'  codex  --version
+
+          # System-wide git config: bind-mounted host repos are owned by a
+          # different uid, and GH_TOKEN auth goes through the helper.
+          check 'git safe.directory'   '*'         "$(docker run --rm "$IMAGE" git config --system --get safe.directory)"
+          check 'git credential.helper' 'ghtoken'  "$(docker run --rm "$IMAGE" git config --system --get credential.helper)"
+
+          # The two host-bridge/auth scripts must be present AND executable.
+          for f in /usr/local/bin/onhost /usr/local/bin/git-credential-ghtoken; do
+            check "executable $f" 'yes' \
+              "$(docker run --rm "$IMAGE" sh -c "[ -x '$f' ] && echo yes || echo no")"
+          done
+
+          {
+            echo '### docker smoke'
+            echo ''
+            echo '```'
+            docker run --rm "$IMAGE" sh -c 'claude --version; codex --version; git --version; node --version'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fails" != 0 ]; then
+            echo "::error::$fails smoke assertion(s) failed"
+            exit 1
+          fi
+          echo "all smoke assertions passed"

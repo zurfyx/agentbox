@@ -1,0 +1,18 @@
+# ShellCheck configuration for the test suite.
+#
+# KEEP THE `disable=` LINES BELOW IN SYNC WITH ../.shellcheckrc — ShellCheck
+# uses the NEAREST .shellcheckrc it finds walking up from the file being
+# checked and does NOT merge parents, so this file must repeat the repo-wide
+# disables. CI verifies that (lint job, "shellcheckrc files agree" step).
+
+# --- repeated from ../.shellcheckrc (see there for the rationale) ---
+disable=SC2034
+disable=SC2254
+
+# --- test-suite-only ---
+# SC2088 "tilde does not expand in quotes": test files assert on literal
+# strings that a script under test wrote somewhere else, e.g.
+#   assert_eq "~/.claude/statusline.sh" "$(json_get "$SETTINGS" ... )"
+# The "~" there is data being compared, not a path this shell must expand.
+# The rule still applies to every real script in the repo.
+disable=SC2088

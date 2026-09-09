@@ -201,6 +201,49 @@ key the whole segment self-hides, so the script is safe to use either way.
 directly to `~/.claude/statusline.sh` are silently reverted on the next `make
 install` / rebuild. Edit `statusline.sh` *here*, then re-run `make install`.
 
+## Tests
+
+```sh
+./tests/run.sh                    # everything
+./tests/run.sh statusline         # one file (path, filename, or fragment)
+./tests/run.sh -k 'quota|token'   # only cases whose name matches an ERE
+./tests/run.sh --keep             # keep the scratch dirs for a post-mortem
+```
+
+Plain bash 3.2 + coreutils, no bats. `jq` is required by the `statusline.sh`
+cases, `zsh` by the `agentbox.sh` launcher cases, `python3` by the `install.sh`
+config-merge cases; a missing tool becomes a counted, listed skip, never a
+silent pass. Each case runs in its own subshell with `$HOME`, `$TMPDIR` and
+`$PATH` redirected into a throwaway scratch dir, so the suite cannot touch your
+real dotfiles. To add a test, read the API contract at the bottom of
+`tests/lib.sh`.
+
+On a pull request CI runs **lint** — ShellCheck pinned by hash, `sh` dialect for
+the two `#!/bin/sh` scripts so bashisms are caught rather than excused, `zsh -n`
+for `agentbox.sh`, and a guard that every tracked shell file is claimed by a
+dialect — and **test**, on `ubuntu-latest` (bash 5) and `macos-latest`, where
+Apple's bash 3.2 is forced onto `PATH` so the suite really runs on the shell
+this repo ships to. A **docker** job builds the image and smoke-tests it, but
+only when the Dockerfile or a file it copies changed, plus on every push to
+`main` and weekly; `npm i -g …@latest` breaking upstream should be visible
+without blocking an unrelated PR. lint and test are the checks worth marking
+required — docker is not, since a skipped required check blocks a PR forever.
+
+**What CI cannot verify.** Nearly everything that makes this tool work on a Mac
+is out of reach of a Linux runner and a stubbed world. Docker Desktop's
+`/Users` and `/Volumes` file sharing and `host.docker.internal` are asserted as
+`docker run` arguments only — never actually mounted, so a Docker Desktop
+update that changes them fails silently here. `onhost` is tested against a stub
+`ssh`: nothing checks that macOS Remote Login, the dedicated key,
+`StrictHostKeyChecking=accept-new`, or `-tt`'s Darwin pty behave as intended.
+There is no real `claude login`, `codex login`, `gh auth token` or authenticated
+`git ls-remote`, so `git-credential-ghtoken` is exercised through its wire
+protocol rather than through git itself. The image smoke test proves
+`claude --version` exits 0, not that either agent CLI does anything useful. And
+the Sapling/Mercurial half of `statusline.sh` is untested outright, because no
+runner ships `sl`. A green build means the shell plumbing is not obviously
+broken; it does not mean the thing runs.
+
 ## Make targets
 
 ```

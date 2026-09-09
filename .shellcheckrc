@@ -1,0 +1,28 @@
+# ShellCheck configuration for agentbox — see .github/workflows/ci.yml.
+#
+# CI runs:  shellcheck --severity=warning --shell=bash|sh <files>
+# ("severity" is a command-line-only option; ShellCheck 0.10 ignores it here,
+# so it lives in the workflow. Everything else lives in this file so that a
+# bare `shellcheck --severity=warning install.sh` on a laptop matches CI.)
+#
+# Severity is "warning": error + warning break the build, info/style do not.
+# The info/style tail in this repo is dominated by findings that are correct by
+# construction — SC2016 (single-quoted stub bodies are evaluated later, by the
+# stub, so they must NOT expand now), SC2317 (functions only reached from a
+# trap), SC1091 (`. lib.sh` is not passed as an input) and SC2086 inside the
+# harness's own controlled expansions. Promoting those to build breakers would
+# just teach people to ignore CI.
+#
+# The disables below are the whole list. Each one is a false positive in this
+# repo, not a bug we are hiding.
+
+# SC2034 "variable appears unused": tests/lib.sh is a library that is sourced
+# into every test file, so it legitimately assigns names (AB_FILE_PATH, ...)
+# that only its consumers read. ShellCheck cannot see across the `.` boundary.
+disable=SC2034
+
+# SC2254 "quote expansions in case patterns": tests/lib.sh matches exit codes
+# with `case $status in 0 | $AB_EXIT_SKIP | $AB_EXIT_FAIL)`. Both are integer
+# constants (96, 97) set a few lines above, so there is no glob to guard
+# against and quoting them would not read more clearly.
+disable=SC2254
