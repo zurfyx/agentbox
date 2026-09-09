@@ -130,9 +130,20 @@ One-time setup (run on the Mac):
 ```sh
 # Enable Remote Login: System Settings -> General -> Sharing -> Remote Login
 #   (or: sudo systemsetup -setremotelogin on)
-# "Allow full disk access for remote users" is NOT needed.
+# "Allow full disk access for remote users" is not needed for running commands,
+# but WITHOUT it, listing TCC-protected dirs (~/Desktop, ~/Documents,
+# ~/Downloads) over ssh hangs forever with no error -- macOS blocks the
+# enumeration on a consent dialog that can never be shown to an ssh session.
+# Exact-path file reads/writes/scp still work. Enable it if the agent will
+# browse those dirs remotely.
 make host-bridge          # generates a dedicated key, authorizes it, verifies
 ```
+
+**Caveats for any Mac reached over ssh** (this host or another machine):
+listing TCC-protected dirs hangs without full disk access (above), and macOS
+ships no GNU `timeout` — so always bound remote calls from the *client* side
+(`timeout 30 ssh …`); a blocked remote call otherwise hangs the session
+indefinitely.
 
 Then, from inside an agentbox session:
 
