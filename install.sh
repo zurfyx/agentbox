@@ -107,5 +107,5 @@ else:
     open(path, "w").write("\n".join(out) + "\n")
 PY
 
-echo "Installed. Run:  source \"$RC\"   then:  agentbox claude   (or: agentbox codex)"
+echo "Installed. Run:  source \"$RC\"   then:  agentbox   (claude is the default; also: agentbox clauded / agentbox codex)"
 echo "Build the image first if you haven't:  make build"
