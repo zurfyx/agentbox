@@ -54,18 +54,52 @@ else
   echo "  Set it on the host: git config --global user.name '...'; git config --global user.email '...'" >&2
 fi
 
-# Status line — Claude: copy the script and register it in settings.json (merge,
-# don't clobber). Claude renders its status line via an external command.
-install -m 0755 "$SCRIPT_DIR/statusline.sh" "$CONFIG_HOME/statusline.sh"
-python3 - "$CONFIG_HOME/settings.json" <<'PY'
+# Status line — Claude: fetch the script, then register it in settings.json
+# (merge, don't clobber). Claude renders its status line via an external command.
+#
+# The script is not vendored here. It is maintained in the dotfiles repo, which
+# installs the same file to the *host's* ~/.claude; fetching it keeps the two
+# homes on one copy instead of two that drift apart. Point STATUSLINE_URL
+# somewhere else to install from a fork, or from a local path for a test:
+#   STATUSLINE_URL="file://$PWD/statusline.sh" ./install.sh
+: "${STATUSLINE_URL:=https://raw.githubusercontent.com/zurfyx/dotfiles/main/dot_claude/executable_statusline.sh}"
+STATUSLINE_TMP="$(mktemp)"
+# Sanity-check what came back before installing it: a captive-portal login page
+# or an HTML 404 body would otherwise land in place as an executable.
+if curl -fsSL --connect-timeout 10 --max-time 60 "$STATUSLINE_URL" -o "$STATUSLINE_TMP" \
+  && [ -s "$STATUSLINE_TMP" ] \
+  && [ "$(head -c 2 "$STATUSLINE_TMP")" = '#!' ]; then
+  install -m 0755 "$STATUSLINE_TMP" "$CONFIG_HOME/statusline.sh"
+  STATUSLINE_OK=1
+elif [ -f "$CONFIG_HOME/statusline.sh" ]; then
+  # Offline, but a previous install left a working copy. Keep it rather than
+  # regress a working setup over a transient network failure.
+  echo "Note: could not fetch the status line — keeping the copy already installed." >&2
+  echo "  $STATUSLINE_URL" >&2
+  STATUSLINE_OK=1
+else
+  # Nothing to fall back to. Say so, and leave statusLine unregistered rather
+  # than point Claude at a command that is not there.
+  echo "Note: could not fetch the status line, and none is installed — skipping it." >&2
+  echo "  $STATUSLINE_URL" >&2
+  echo "  Claude Code works fine without it; re-run ./install.sh once you are online." >&2
+  STATUSLINE_OK=0
+fi
+rm -f "$STATUSLINE_TMP"
+
+python3 - "$CONFIG_HOME/settings.json" "$STATUSLINE_OK" <<'PY'
 import json, os, sys
-path = sys.argv[1]
+path, statusline_ok = sys.argv[1], sys.argv[2] == "1"
 data = {}
 if os.path.exists(path):
     try: data = json.load(open(path))
     except Exception: data = {}
 data.setdefault("theme", "auto")
-data["statusLine"] = {"type": "command", "command": "~/.claude/statusline.sh"}
+# Only claim a status line we actually installed. An unregistered statusLine is
+# a missing feature; a registered one pointing at nothing is an error on every
+# render. A registration left by a previous install is not disturbed.
+if statusline_ok:
+    data["statusLine"] = {"type": "command", "command": "~/.claude/statusline.sh"}
 json.dump(data, open(path, "w"), indent=2)
 PY
 
