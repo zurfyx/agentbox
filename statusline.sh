@@ -114,8 +114,12 @@ WEEK=$(rl seven_day used_percentage);  WEEK_AT=$(rl seven_day resets_at)
 QUOTA="$(quota_seg "$FIVE" "$FIVE_AT" 5h)$(quota_seg "$WEEK" "$WEEK_AT" 7d)"
 [ -n "$QUOTA" ] && QUOTA=" | ${QUOTA% }"
 
-# Prompt cache, trailing group: time left before the cached prefix goes cold.
-# Warm only — a cold cache has no countdown to show, so the group disappears
+# Prompt cache: time left before the cached prefix goes cold. Rides in the
+# context group — how full this conversation is, and how long it stays cached,
+# are the same subject, and the flame keeps the two numbers apart without a
+# separator between them.
+#
+# Warm only — a cold cache has no countdown to show, so it disappears
 # rather than reporting its own absence. Also absent before the first API
 # response, and whenever the provider reports no cache tokens at all (gate on
 # caching_observed, else a non-caching provider looks permanently cold). Read
@@ -128,9 +132,13 @@ if [ "$(echo "$input" | jq -r '.prompt_cache.caching_observed == true and .promp
   # presentation, so the terminal paints them its own color and ignores the
   # dim. Private-use glyphs are plain outlines that take the color you give
   # them, the same way the  branch icon does.
-  [ -n "$EXP" ] && CACHE=" | ${DIM}󰈸$(fmt_left $((EXP - NOW)))${R}"
+  # Undimmed, to match the context percentage it now sits beside — the two
+  # numbers are one group, so they read as one weight.
+  [ -n "$EXP" ] && CACHE=" 󰈸$(fmt_left $((EXP - NOW)))"
 fi
 
-# Cost and elapsed are one group: both are session totals that only count up.
-# The cache countdown keeps the last slot to itself.
-echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${QUOTA} | ${COST} ${MINS}m${SECS}s${CACHE}"
+# Groups run left to right by increasing time horizon: the working tree right
+# now, then this conversation (how full, how long cached), then this session's
+# spend, then the quota windows measured in hours and days. Cost and elapsed
+# share a group because both are session totals that only count up.
+echo -e "[$MODEL] ${DIM}${DIR}${R}${BRANCH} | ${C}${BAR}${R} ${PCT}%${CACHE} | ${COST} ${MINS}m${SECS}s${QUOTA}"
