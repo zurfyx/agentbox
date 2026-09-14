@@ -3,14 +3,18 @@
 # a mounted volume (~/.agentbox on the host), not inside the image.
 FROM node:22-bookworm
 
-# Pin versions with:  make build CLAUDE_VERSION=1.2.3 CODEX_VERSION=0.144.3
+# Versions are required to be concrete: the launcher and Makefile resolve npm's
+# current versions before invoking Docker. A literal "latest" here would make
+# Docker reuse a stale installation layer after the registry tag moves.
 # Install each in its OWN layer: claude-code's postinstall (node install.cjs)
 # downloads a native binary and doesn't complete reliably when co-installed with
 # another package in a single `npm install`.
-ARG CLAUDE_VERSION=latest
-ARG CODEX_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
-RUN npm install -g @openai/codex@${CODEX_VERSION}
+ARG CLAUDE_VERSION
+ARG CODEX_VERSION
+RUN test -n "${CLAUDE_VERSION}" \
+  && npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
+RUN test -n "${CODEX_VERSION}" \
+  && npm install -g @openai/codex@${CODEX_VERSION}
 
 # A few niceties the agents commonly shell out to.
 RUN apt-get update \
@@ -32,8 +36,8 @@ RUN chmod +x /usr/local/bin/onhost
 
 # Disposable container: the agents can't (and shouldn't) update themselves in
 # place — the global install dir isn't writable by `node` and any change is lost
-# on exit. Updates happen by rebuilding the image (`make update`). Silence Claude
-# Code's background auto-updater so it doesn't error on every start.
+# on exit. Updates happen by rebuilding the image (the launcher or `make update`).
+# Silence Claude Code's background auto-updater so it doesn't error on every start.
 ENV DISABLE_AUTOUPDATER=1
 
 # Claude Code (and Codex) refuse their --dangerously-* flags as root, so run as

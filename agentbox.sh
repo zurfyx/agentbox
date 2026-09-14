@@ -21,32 +21,61 @@
 # Directory of this script (the repo) — used to rebuild the image on update.
 : "${AGENTBOX_REPO:=${${(%):-%x}:A:h}}"
 
-# Keep the image current on launch. Throttled: at most once every
-# $AGENTBOX_UPDATE_INTERVAL_DAYS (default 1). Rebuilds ONLY when a newer Claude
-# or Codex is actually published, reusing cached layers (only the changed agent's
-# layer refetches). Disable with AGENTBOX_AUTO_UPDATE=0. Never blocks on failure
-# (offline, npm error, missing repo) — it just proceeds with the current image.
+# Return the registry's concrete version, never the mutable "latest" tag. Docker
+# cannot know that a registry tag changed, so using @latest in a RUN instruction
+# can silently reuse an old installation layer.
+_agentbox_latest_version() {
+  local version
+  version=$(npm view "$1" version 2>/dev/null) || return 1
+  [ -n "$version" ] || return 1
+  printf '%s\n' "$version"
+}
+
+_agentbox_build() {
+  local claude_version="$1" codex_version="$2"
+  docker build \
+    --build-arg CLAUDE_VERSION="$claude_version" \
+    --build-arg CODEX_VERSION="$codex_version" \
+    -t "$AGENTBOX_IMAGE" "$AGENTBOX_REPO" \
+    >"$AGENTBOX_HOME/.last-update.log" 2>&1
+}
+
+# Keep the image current on launch. Throttled: at most once every successful
+# $AGENTBOX_UPDATE_INTERVAL_DAYS (default 1). Rebuilds only when a published
+# version differs, reusing cached layers (only the changed agent refetches).
+# Disable with AGENTBOX_AUTO_UPDATE=0. Never blocks an existing image on failure.
 _agentbox_maybe_update() {
   case "${AGENTBOX_AUTO_UPDATE:-1}" in 0 | off | no) return 0 ;; esac
   mkdir -p "$AGENTBOX_HOME"
   local stamp="$AGENTBOX_HOME/.last-update-check" now last age
   now=$(date +%s); last=0; [ -f "$stamp" ] && last=$(cat "$stamp" 2>/dev/null || echo 0)
 
-  # First run / after `make clean`: build so there's something to launch.
+  local latest_claude latest_codex
+
+  # First run / after `make clean`: resolve immutable versions before building.
+  # BuildKit may retain layers after an image is deleted, so a build using the
+  # literal @latest is not sufficient to guarantee a current installation.
   if ! docker image inspect "$AGENTBOX_IMAGE" >/dev/null 2>&1; then
     echo "agentbox: image '$AGENTBOX_IMAGE' not found — building…" >&2
-    docker build -t "$AGENTBOX_IMAGE" "$AGENTBOX_REPO" >"$AGENTBOX_HOME/.last-update.log" 2>&1 \
-      && echo "$now" > "$stamp" || echo "agentbox: build failed (see $AGENTBOX_HOME/.last-update.log)" >&2
+    latest_claude=$(_agentbox_latest_version @anthropic-ai/claude-code) || latest_claude=""
+    latest_codex=$(_agentbox_latest_version @openai/codex) || latest_codex=""
+    if [ -z "$latest_claude" ] || [ -z "$latest_codex" ]; then
+      echo "agentbox: cannot resolve current agent versions from npm — build deferred." >&2
+      return 1
+    fi
+    if _agentbox_build "$latest_claude" "$latest_codex"; then
+      echo "$now" > "$stamp"
+    else
+      echo "agentbox: build failed (see $AGENTBOX_HOME/.last-update.log)" >&2
+      return 1
+    fi
     return 0
   fi
 
   age=$(( (now - last) / 86400 ))
   [ "$age" -lt "${AGENTBOX_UPDATE_INTERVAL_DAYS:-1}" ] && return 0
-  echo "$now" > "$stamp"   # stamp up front so we check at most once per interval
-
-  local latest_claude latest_codex
-  latest_claude=$(npm view @anthropic-ai/claude-code version 2>/dev/null) || latest_claude=""
-  latest_codex=$(npm view @openai/codex version 2>/dev/null) || latest_codex=""
+  latest_claude=$(_agentbox_latest_version @anthropic-ai/claude-code) || latest_claude=""
+  latest_codex=$(_agentbox_latest_version @openai/codex) || latest_codex=""
   [ -z "$latest_claude$latest_codex" ] && return 0   # offline / npm unavailable
 
   local vers cur_claude cur_codex
@@ -56,15 +85,27 @@ _agentbox_maybe_update() {
 
   if { [ -n "$latest_claude" ] && [ "$latest_claude" != "$cur_claude" ]; } ||
      { [ -n "$latest_codex" ] && [ "$latest_codex" != "$cur_codex" ]; }; then
+    # If one registry lookup failed, keep that agent at the exact version already
+    # installed. Never fall back to a cacheable @latest build argument.
+    local build_claude="${latest_claude:-$cur_claude}"
+    local build_codex="${latest_codex:-$cur_codex}"
+    if [ -z "$build_claude" ] || [ -z "$build_codex" ]; then
+      echo "agentbox: could not determine both installed versions — update deferred." >&2
+      return 0
+    fi
     echo "agentbox: updating (claude ${cur_claude:-?}→${latest_claude:-$cur_claude}, codex ${cur_codex:-?}→${latest_codex:-$cur_codex})…" >&2
-    if docker build \
-        --build-arg CLAUDE_VERSION="${latest_claude:-latest}" \
-        --build-arg CODEX_VERSION="${latest_codex:-latest}" \
-        -t "$AGENTBOX_IMAGE" "$AGENTBOX_REPO" >"$AGENTBOX_HOME/.last-update.log" 2>&1; then
+    if _agentbox_build "$build_claude" "$build_codex"; then
       echo "agentbox: updated." >&2
     else
       echo "agentbox: update failed (see $AGENTBOX_HOME/.last-update.log) — continuing with current image." >&2
+      return 0
     fi
+  fi
+
+  # A partial/offline check is deliberately not throttled for a day. Once both
+  # registry queries succeed, record the check (and any required build) as done.
+  if [ -n "$latest_claude" ] && [ -n "$latest_codex" ]; then
+    echo "$now" > "$stamp"
   fi
 }
 
@@ -72,7 +113,7 @@ _agentbox_maybe_update() {
 _agentbox_run() {
   local agent="$1"; shift
   mkdir -p "$AGENTBOX_HOME"
-  _agentbox_maybe_update
+  _agentbox_maybe_update || return 1
 
   # GitHub auth for git inside the container (Linux can't use the Mac gh/keychain).
   # Passed by NAME below so it never appears in the docker-run argv (ps-visible).

@@ -22,6 +22,8 @@ Host                          Docker container (runs as non-root "node")
 
 - **macOS** with **Docker Desktop** (the `/Users` mounts and `host.docker.internal`
   rely on it) and **zsh**.
+- **Node.js/npm** on the host, used only to resolve current agent versions before
+  building. The agents themselves still run entirely inside Docker.
 - **GitHub CLI** for in-container git auth: `brew install gh && gh auth login`
   (or export your own `GH_TOKEN`). Without it, private-repo git won't work.
 - Host git identity set (`git config --global user.name` / `user.email`) if you
@@ -85,12 +87,13 @@ background auto-update can't work (the image sets `DISABLE_AUTOUPDATER=1` to
 silence it). Updating means rebuilding the image, and the launcher does that for
 you automatically.
 
-**Auto-update on launch (default).** When you run `agentbox` / `codex`,
+**Auto-update on launch (default).** When you run `agentbox` / `agentbox codex`,
 the launcher checks — at most once a day — whether a newer Claude or Codex has
 been published, and if so rebuilds the image before starting (reusing cached
-layers, so only the changed agent refetches). It's silent when you're current,
-skips gracefully when offline, and never blocks the launch on failure. Tune or
-turn it off:
+layers where possible). The launcher resolves concrete npm
+versions before building; it never puts the mutable `latest` tag into a cached
+Docker layer. It's silent when you're current, skips gracefully when offline,
+and never blocks launch when an existing image is available. Tune or turn it off:
 
 ```sh
 AGENTBOX_AUTO_UPDATE=0 agentbox                 # skip the check this run
@@ -215,7 +218,7 @@ local path with `file://`.
 ```
 make build      Build the image (VERSION=x.y.z CODEX_VERSION=a.b.c to pin)
 make rebuild    Rebuild without cache
-make update     Update agents to latest (rebuild; the only update path)
+make update     Force both agents to their latest published versions
 make install    Add the shell functions to ~/.zshrc
 make run        Build + run Claude in the current directory
 make run-dangerous  Build + run Claude with --dangerously-skip-permissions

@@ -1,6 +1,8 @@
 IMAGE   ?= agentbox
-VERSION ?= latest          # Claude Code version
-CODEX_VERSION ?= latest    # Codex version
+# Resolve mutable npm tags outside Docker so a changed version invalidates the
+# appropriate installation layer. Callers may still override either value.
+VERSION ?= $(shell npm view @anthropic-ai/claude-code version 2>/dev/null)
+CODEX_VERSION ?= $(shell npm view @openai/codex version 2>/dev/null)
 HOME_DIR ?= $(HOME)/.agentbox
 
 # Shared docker args for the run/shell targets (parity with the agentbox launcher).
@@ -9,15 +11,19 @@ DOCKER_ARGS = --rm -it \
   -v "$(HOME_DIR)":/home/node -v /Users:/Users -v /Volumes:/Volumes -v /tmp:/tmp -w "$(PWD)" \
   -e GH_TOKEN -e AGENTBOX_HOST=host.docker.internal -e AGENTBOX_HOST_USER="$$USER"
 
-.PHONY: build rebuild update install run run-dangerous run-codex shell host-bridge clean help
+.PHONY: check-versions build rebuild update install run run-dangerous run-codex shell host-bridge clean help
 
-build: ## Build the image (pin: make build VERSION=1.2.3 CODEX_VERSION=0.144.3)
+check-versions:
+	@test -n "$(VERSION)" || { echo "Could not resolve Claude Code's current version from npm." >&2; exit 1; }
+	@test -n "$(CODEX_VERSION)" || { echo "Could not resolve Codex's current version from npm." >&2; exit 1; }
+
+build: check-versions ## Build the image (pin: make build VERSION=1.2.3 CODEX_VERSION=0.144.3)
 	docker build --build-arg CLAUDE_VERSION=$(VERSION) --build-arg CODEX_VERSION=$(CODEX_VERSION) -t $(IMAGE) .
 
-rebuild: ## Rebuild without cache (picks up latest agent versions)
+rebuild: check-versions ## Rebuild without cache (picks up latest agent versions)
 	docker build --no-cache --build-arg CLAUDE_VERSION=$(VERSION) --build-arg CODEX_VERSION=$(CODEX_VERSION) -t $(IMAGE) .
 
-update: rebuild ## Update the agents to latest (the only supported update path)
+update: rebuild ## Force both agents to their latest published versions
 	@echo "Updated. Claude + Codex are now at the versions baked into the fresh image."
 
 install: ## Add the shell functions to ~/.zshrc
