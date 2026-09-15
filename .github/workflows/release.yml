@@ -11,6 +11,11 @@ on:
         description: Exact protected-main commit (40 lowercase hex)
         required: true
         type: string
+      replace_unpublished_image:
+        description: Replace a private vX.Y.Z image left by a failed unpublished release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -36,6 +41,7 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/agentbox-runtime
       VERSION: ${{ inputs.version }}
       SOURCE_COMMIT: ${{ inputs.source_commit }}
+      REPLACE_UNPUBLISHED_IMAGE: ${{ inputs.replace_unpublished_image }}
     steps:
       - name: Check out the exact requested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,16 +111,41 @@ jobs:
           descriptor=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest}}')
           index=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor")
           images=$(docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Image}}')
+          matches_source=true
           for platform in linux/amd64 linux/arm64; do
             labels=$(jq -er --arg platform "$platform" '.[$platform].config.Labels' <<<"$images")
-            test "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" = "https://github.com/$GITHUB_REPOSITORY"
-            test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = "$SOURCE_COMMIT"
-            test "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" = "$VERSION"
-            test "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" = MIT
-            test "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" = 1
-            test "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" = '${{ steps.prerequisites.outputs.instructions_sha }}'
-            test "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" = '${{ steps.prerequisites.outputs.statusline_sha }}'
+            [[ "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" == "https://github.com/$GITHUB_REPOSITORY" ]] || matches_source=false
+            [[ "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" == "$SOURCE_COMMIT" ]] || matches_source=false
+            [[ "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" == "$VERSION" ]] || matches_source=false
+            [[ "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" == MIT ]] || matches_source=false
+            [[ "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" == 1 ]] || matches_source=false
+            [[ "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.instructions_sha }}' ]] || matches_source=false
+            [[ "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.statusline_sha }}' ]] || matches_source=false
           done
+          if [[ $matches_source != true ]]; then
+            [[ $REPLACE_UNPUBLISHED_IMAGE == true ]] || {
+              echo "v$VERSION exists but does not match the requested immutable source" >&2
+              exit 1
+            }
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1 ||
+               gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" >/dev/null 2>&1; then
+              echo "refusing to replace an image with an existing tag or release" >&2
+              exit 1
+            fi
+            test "$(gh api "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime" --jq .visibility)" = private || {
+              echo "refusing to replace a non-private image" >&2
+              exit 1
+            }
+            candidate=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.metadata.container.tags | index($tag))] | if length == 1 then .[0] else error("expected one tagged package version") end' <<<"$versions")
+            test "$(jq -c '.metadata.container.tags | sort' <<<"$candidate")" = "[\"v$VERSION\"]" || {
+              echo "refusing to replace a package version carrying additional tags" >&2
+              exit 1
+            }
+            version_id=$(jq -er '.id | select(type == "number")' <<<"$candidate")
+            gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions/$version_id"
+            echo 'present=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo 'present=true' >>"$GITHUB_OUTPUT"
           echo "index=$index" >>"$GITHUB_OUTPUT"
       - name: Build and publish the exact multi-architecture runtime
@@ -400,4 +431,22 @@ jobs:
             echo "Refusing tap auto-merge: main is not protected. The PR remains open." >&2
             exit 1
           fi
-          gh pr merge "$TAP_PR" --repo "$repo" --auto --squash --delete-branch
+          head=$(gh pr view "$TAP_PR" --repo "$repo" --json headRefOid --jq .headRefOid)
+          deadline=$((SECONDS + 900))
+          while ((SECONDS < deadline)); do
+            checks=$(gh api "repos/$repo/commits/$head/check-runs?per_page=100")
+            if jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and .conclusion == "success")] | length == 1' <<<"$checks" >/dev/null; then
+              break
+            fi
+            if jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and (.conclusion | IN("failure", "cancelled", "timed_out", "action_required", "startup_failure")))] | length > 0' <<<"$checks" >/dev/null; then
+              echo "Tap aggregate CI failed; the PR remains open." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and .conclusion == "success")] | length == 1' <<<"$checks" >/dev/null || {
+            echo "Tap aggregate CI did not succeed before the timeout; the PR remains open." >&2
+            exit 1
+          }
+          test "$(gh pr view "$TAP_PR" --repo "$repo" --json headRefOid --jq .headRefOid)" = "$head"
+          gh pr merge "$TAP_PR" --repo "$repo" --squash --delete-branch --match-head-commit "$head"
