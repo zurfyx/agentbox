@@ -135,4 +135,22 @@ jobs:
             echo "Refusing auto-merge: main is not protected. The PR remains open." >&2
             exit 1
           fi
-          gh pr merge "$PR" --auto --squash --delete-branch
+          head=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
+          deadline=$((SECONDS + 900))
+          while ((SECONDS < deadline)); do
+            checks=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head/check-runs?per_page=100")
+            if jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and .conclusion == "success")] | length == 1' <<<"$checks" >/dev/null; then
+              break
+            fi
+            if jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and (.conclusion | IN("failure", "cancelled", "timed_out", "action_required", "startup_failure")))] | length > 0' <<<"$checks" >/dev/null; then
+              echo "Aggregate CI failed; the PR remains open." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          jq -e '[.check_runs[] | select(.name == "required" and .app.slug == "github-actions" and .conclusion == "success")] | length == 1' <<<"$checks" >/dev/null || {
+            echo "Aggregate CI did not succeed before the timeout; the PR remains open." >&2
+            exit 1
+          }
+          test "$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" = "$head"
+          gh pr merge "$PR" --squash --delete-branch --match-head-commit "$head"

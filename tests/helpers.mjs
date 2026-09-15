@@ -26,7 +26,7 @@ export function run(command, args = [], options = {}) {
     encoding: "utf8",
     env: environment,
     input: options.input,
-    timeout: options.timeout ?? 15_000,
+    timeout: options.timeout ?? 30_000,
   });
 }
 
