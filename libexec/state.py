@@ -464,12 +464,18 @@ def protocol_json(raw: bytes, expected: set[str], where: str) -> dict[str, Any]:
     return value
 
 def candidate_limits(name: str) -> list[str]:
-    return ["--name", name, "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--pids-limit", "128"]
+    return ["--name", name, "--user", f"{os.getuid()}:{os.getgid()}", "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--pids-limit", "128"]
+
+def candidate_tmpfs(path: str, size: str, *, executable: bool = False) -> str:
+    options = ["rw", "nosuid", "nodev", f"size={size}", f"uid={os.getuid()}", f"gid={os.getgid()}", "mode=0700"]
+    if not executable:
+        options.append("noexec")
+    return f"{path}:{','.join(options)}"
 
 def validate_release(engine: Path, image: str, platform_name: str, release: Path, manifest: dict[str, Any]) -> dict[str, bool]:
     name = f"agentbox-validate-{uuid.uuid4().hex}"
-    raw = run_checked([str(engine), "run", "--rm", *candidate_limits(name), "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                       "--tmpfs", "/home/node:rw,nosuid,nodev,size=64m", "--tmpfs", "/run:rw,noexec,nosuid,size=4m",
+    raw = run_checked([str(engine), "run", "--rm", *candidate_limits(name), "--network", "none", "--read-only", "--tmpfs", candidate_tmpfs("/tmp", "16m"),
+                       "--tmpfs", candidate_tmpfs("/home/node", "64m", executable=True), "--tmpfs", candidate_tmpfs("/run", "4m"),
                        "--mount", f"type=bind,src={release},dst=/opt/agentbox-release,readonly", image, "validate", "--protocol", "1",
                        "--platform", platform_name, "--manifest", "/opt/agentbox-release/manifest.json", "--candidate", "/opt/agentbox-release/vendor"],
                       capture=True, timeout=180, cleanup=(engine, name))
@@ -534,8 +540,8 @@ def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str
             download_artifact(artifacts["claude"], downloads / "claude", expected_version)
             download_artifact(artifacts["codex"], downloads / "codex.tar.gz", expected_version)
             prepare_name = f"agentbox-prepare-{uuid.uuid4().hex}"
-            prepare_raw = run_checked([str(engine), "run", "--rm", *candidate_limits(prepare_name), "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                                       "--tmpfs", "/home/node:rw,nosuid,nodev,size=64m", "--mount", f"type=bind,src={staging},dst=/opt/agentbox-release", image,
+            prepare_raw = run_checked([str(engine), "run", "--rm", *candidate_limits(prepare_name), "--network", "none", "--read-only", "--tmpfs", candidate_tmpfs("/tmp", "16m"),
+                                       "--tmpfs", candidate_tmpfs("/home/node", "64m", executable=True), "--mount", f"type=bind,src={staging},dst=/opt/agentbox-release", image,
                                        "prepare", "--protocol", "1", "--platform", platform_name, "--manifest", "/opt/agentbox-release/manifest.json",
                                        "--downloads", "/opt/agentbox-release/downloads", "--output", "/opt/agentbox-release/vendor"],
                                       capture=True, timeout=180, cleanup=(engine, prepare_name))
