@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "command": "/usr/local/share/agentbox/statusline.sh",
+    "refreshInterval": 60,
+    "type": "command"
+  }
+}

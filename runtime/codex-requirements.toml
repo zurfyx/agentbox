@@ -1,0 +1,3 @@
+# Agentbox owns vendor version selection. This requirement is image-owned and
+# read-only; the runtime also supplies the same value on the command line.
+check_for_update_on_startup = false

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "agentbox_version": "0.1.0",
+  "runtime_protocol_version": 1,
+  "runtime": { "image_repository": "ghcr.io/zurfyx/agentbox-runtime" },
+  "tools": {
+    "claude": {
+      "version": "2.1.272",
+      "kind": "raw-executable",
+      "platforms": [
+        { "platform": "linux/arm64", "url": "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-arm64/claude", "sha256": "214a90efdd16ee0ea81132ffecced588dba394d178cc494f285ba04b5288c8de", "size": 227074288 },
+        { "platform": "linux/amd64", "url": "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-x64/claude", "sha256": "d81396a668eb76fbddb49a2a5841f1b5d7af96b4c1f6500ced92f2c988f5bcd4", "size": 227115320 }
+      ]
+    },
+    "codex": {
+      "version": "0.154.0",
+      "kind": "tar.gz-package",
+      "layout_version": 1,
+      "entrypoint": "bin/codex",
+      "allowed_members": ["bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json", "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap", "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh"],
+      "platforms": [
+        { "platform": "linux/arm64", "target": "aarch64-unknown-linux-musl", "url": "https://releases.openai.com/codex/releases/0.154.0/codex-package-aarch64-unknown-linux-musl.tar.gz", "sha256": "97d93e11df72d3c26772db019e6ea8bb72c246500d46b98c760839f3240355e6", "size": 118112884 },
+        { "platform": "linux/amd64", "target": "x86_64-unknown-linux-musl", "url": "https://releases.openai.com/codex/releases/0.154.0/codex-package-x86_64-unknown-linux-musl.tar.gz", "sha256": "fc6e3e3b85f2cf7d664520ee5c66a7fe4aa12bae7d46834f47e2f165fd0d6f78", "size": 126585776 }
+      ]
+    }
+  },
+  "managed_files": {
+    "runtime_instructions": { "path": "/usr/local/share/agentbox/instructions.md", "sha256": "0ff973bdd17e72a441e5880a112299ec0e566708862a8b5eae6c68d7e53a0478" },
+    "statusline": { "path": "/usr/local/share/agentbox/statusline.sh", "sha256": "ebcf9964b8f3741d56034ab95afaca4b1eb9abe78fbd2f59e9b1994cf9468501" }
+  }
+}

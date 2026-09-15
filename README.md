@@ -1,229 +1,304 @@
-# agentbox
+# Agentbox
 
-Run personal AI coding agents — **Claude Code** and **Codex** — inside one Docker
-container on your Mac, each with its own login, isolated from the work/corporate
-identity on the host.
+Agentbox runs personal Claude Code and Codex sessions in a version-pinned,
+non-root Docker container on macOS. The agents get a persistent home separate
+from your host tools, while your working files remain available at their normal
+absolute paths.
 
-Handy when your host enforces a corporate identity (e.g. `ANTHROPIC_API_KEY` set
-globally, SSO auto-picks your work account, or the agent CLI is an internal fork)
-but you want personal agents in the same terminal. The container gets its own
-home, auth, and environment; your files are mounted in, so editing, git, and your
-editor work as usual.
+Agentbox is identity separation and release management, not a sandbox for your
+files. Normal sessions can read and write broad host mounts. See
+[Security boundary](#security-boundary) before using a dangerous mode.
 
-```
-Host                          Docker container (runs as non-root "node")
-  claude / codex (work)   →     claude + codex (personal logins)
-  ANTHROPIC_API_KEY             ~/.agentbox → /home/node  (holds ~/.claude, ~/.codex)
-                                /Users, /Volumes → same paths (full FS access)
-                                $PWD → working dir
-```
+## How it works
 
-## Prerequisites
+One Agentbox release manifest pins all three parts of a session:
 
-- **macOS** with **Docker Desktop** (the `/Users` mounts and `host.docker.internal`
-  rely on it) and **zsh**.
-- **Node.js/npm** on the host, used only to resolve current agent versions before
-  building. The agents themselves still run entirely inside Docker.
-- **GitHub CLI** for in-container git auth: `brew install gh && gh auth login`
-  (or export your own `GH_TOKEN`). Without it, private-repo git won't work.
-- Host git identity set (`git config --global user.name` / `user.email`) if you
-  want commits made inside the container attributed to you.
+- the payload-free Agentbox runtime image by OCI digest;
+- the Claude Code executable by exact version, byte length, and SHA-256; and
+- the complete Codex package by exact version, byte length, SHA-256, and layout.
 
-## Setup
+Homebrew installs only host-side files, documentation, and static shell
+completions. It does not run Docker, download an agent, or create
+`~/.agentbox`. `agentbox setup` downloads the pinned vendor artifacts directly
+from Anthropic and OpenAI, verifies them, validates them in an isolated
+candidate container, and atomically selects the complete release. The release
+design keeps both vendor programs out of the runtime image and Agentbox archive.
 
-```sh
-git clone https://github.com/zurfyx/agentbox ~/Code/agentbox
-cd ~/Code/agentbox
-make build      # builds the "agentbox" image (Claude Code + Codex)
-make install    # sources agentbox.sh from your ~/.zshrc
-source ~/.zshrc
-```
+Normal launches use the selected local release without querying Homebrew,
+GitHub, GHCR, npm, or a vendor version channel. If a newly installed Agentbox
+release has not been prepared, launch may lazily perform the same exact-target
+setup; `--no-update` suppresses that reconciliation when a usable release is
+already active.
 
-## Usage
+## Requirements
 
-```sh
-agentbox                     # personal Claude Code in the current directory
-agentbox "fix bug"           # claude is the default mode — args pass straight through
-agentbox --resume
-agentbox claude --resume     # same thing, spelled out
-agentbox clauded             # Claude Code with --dangerously-skip-permissions
-agentbox clauded --resume    # extra args still work on top of the bundled flag
-agentbox codex               # personal Codex in the current directory
-```
+- macOS with Docker Desktop. Docker Desktop is the supported v1 engine;
+  Colima and other Docker-compatible engines are not yet qualified.
+- Homebrew for the packaged installation. The formula supplies Python and jq;
+  the launcher targets macOS's `/bin/bash` 3.2. Docker Desktop is installed
+  separately.
+- Optional: GitHub CLI (`gh auth login`) for HTTPS Git operations against
+  private GitHub repositories from a session. Its raw token becomes available
+  to the agent process and its children; see [GitHub](#github).
+- Optional: macOS Remote Login for the `onhost` bridge.
 
-`claude` is the default mode: any argument that isn't a known subcommand
-(`claude`, `clauded`, `codex`) is handed to Claude Code as-is. `clauded` is the
-same launch with `--dangerously-skip-permissions` bundled in, so you opt into
-skipping permission prompts by name rather than by default. `agentbox help`
-prints the summary.
+The release targets both `linux/arm64` and `linux/amd64` runtime artifacts, but
+native Intel Mac behavior is not yet qualified. Docker must be running for
+`setup`, launches, and engine checks in `doctor`; it is not needed for
+installation, `--help`, `--version`, or `info`.
 
-First run of each prompts you to log in with your **personal** account:
+## Install
 
-- **Claude** — the usual browser/paste-a-code flow.
-- **Codex** — run `codex login` (ChatGPT OAuth via the published `localhost:1455`
-  callback), or export `OPENAI_API_KEY` before launching.
-
-Both logins persist in `~/.agentbox` across runs (the container itself is `--rm`
-and disposable).
-
-## Customize
-
-Override via env vars before sourcing, or in your shell:
-
-| Var                            | Default       | Meaning                                   |
-| ------------------------------ | ------------- | ----------------------------------------- |
-| `AGENTBOX_IMAGE`               | `agentbox`    | Docker image name                         |
-| `AGENTBOX_HOME`                | `~/.agentbox` | Persistent config/logins on host          |
-| `AGENTBOX_AUTO_UPDATE`         | `1`           | Auto-update the image on launch (`0` off) |
-| `AGENTBOX_UPDATE_INTERVAL_DAYS`| `1`           | How often the launch check may run        |
-
-Pin versions: `make build VERSION=1.2.3 CODEX_VERSION=0.144.3`.
-
-## Updating
-
-The agents are **baked into the image** — the container is disposable (`--rm`)
-and its global install dir isn't writable, so Claude Code's in-container
-background auto-update can't work (the image sets `DISABLE_AUTOUPDATER=1` to
-silence it). Updating means rebuilding the image, and the launcher does that for
-you automatically.
-
-**Auto-update on launch (default).** When you run `agentbox` / `agentbox codex`,
-the launcher checks — at most once a day — whether a newer Claude or Codex has
-been published, and if so rebuilds the image before starting (reusing cached
-layers where possible). The launcher resolves concrete npm
-versions before building; it never puts the mutable `latest` tag into a cached
-Docker layer. It's silent when you're current, skips gracefully when offline,
-and never blocks launch when an existing image is available. Tune or turn it off:
+The intended packaged installation is:
 
 ```sh
-AGENTBOX_AUTO_UPDATE=0 agentbox                 # skip the check this run
-export AGENTBOX_UPDATE_INTERVAL_DAYS=7          # check weekly instead of daily
+brew install zurfyx/tap/agentbox
+agentbox setup
 ```
 
-**Manual / forced.** Update right now, or pin exact versions:
+The public tap, release asset, and GHCR visibility have not completed their
+live publication canaries yet. Treat that command as the release interface,
+not as a currently qualified installation path. Use the source workflow below
+for development until a release is published.
+
+The formula installs Bash, zsh, and fish completions without editing shell
+startup files. Homebrew's normal shell integration discovers them.
+
+For a source checkout:
 
 ```sh
-cd ~/Code/agentbox && make update               # rebuild --no-cache, latest both
-make build VERSION=1.2.3 CODEX_VERSION=0.144.3  # pin
+git clone https://github.com/zurfyx/agentbox.git
+cd agentbox
+./bin/agentbox --help
+./scripts/dev.sh setup
 ```
 
-If you ever see "Auto-update failed" *inside* a session, it's a stale image from
-before this setting — the next launch's auto-update (or `make update`) clears it.
+A checkout has reviewed release inputs, not the final digest-bound manifest
+shipped in a release archive. Use `scripts/dev.sh` for setup and agent launches:
+it builds the payload-free image, inspects its immutable local image ID, renders
+a temporary development manifest, and opts the launcher into explicit
+development mode. Plain `./bin/agentbox setup` intentionally refuses an
+unrendered checkout.
 
-## Git / GitHub inside the container
+Agentbox no longer has a manual shell installer and does not modify `.zshrc`.
+If upgrading from the old shell-function version, remove its previous `source`
+line if your shell resolves that legacy function before the new executable.
 
-A Linux container can't run the macOS `gh` binary or read the keychain, so git
-auth is handled at launch instead:
-
-- The launcher injects the host's live token (`gh auth token`) as `GH_TOKEN`,
-  passed by name so it never lands in the `docker run` argv (`ps`-visible).
-- The image ships a tiny credential helper (`git-credential-ghtoken`) that feeds
-  that token to git over HTTPS **only for `github.com`** (it reads git's request
-  on stdin and declines every other host, so the token can't leak to a rogue or
-  non-GitHub remote), plus `safe.directory=*` so bind-mounted repos (owned by
-  your macOS uid, not the container's) don't trip "dubious ownership".
-- `install.sh` mirrors your host git `user.name` / `user.email` **if set** so
-  commits are attributed correctly (merged into your personal `.gitconfig`).
-
-Net result: `git pull` / `git push` just work — no keychain, no 1Password prompt,
-no token stored on disk — always using your current `gh` session.
-
-Only HTTPS remotes work (`https://github.com/...`), not SSH. Convert a repo with:
-`git remote set-url origin https://github.com/<owner>/<repo>.git`.
-
-## Running macOS-host-only commands (`onhost`)
-
-Some steps can't run in a Linux container at all — macOS-only binaries, or tests
-that depend on Darwin kernel / pty behavior. Instead of switching terminals, the
-container hops to the Mac over SSH.
-
-One-time setup (run on the Mac):
+## Run agents
 
 ```sh
-# Enable Remote Login: System Settings -> General -> Sharing -> Remote Login
-#   (or: sudo systemsetup -setremotelogin on)
-# "Allow full disk access for remote users" is not needed for running commands,
-# but WITHOUT it, listing TCC-protected dirs (~/Desktop, ~/Documents,
-# ~/Downloads) over ssh hangs forever with no error -- macOS blocks the
-# enumeration on a consent dialog that can never be shown to an ssh session.
-# Exact-path file reads/writes/scp still work. Enable it if the agent will
-# browse those dirs remotely.
-make host-bridge          # generates a dedicated key, authorizes it, verifies
+agentbox                         # Claude Code (default)
+agentbox "fix the flaky test"    # arguments pass through unchanged
+agentbox --resume               # unknown root flags belong to Claude
+agentbox claude --resume        # explicit Claude selector
+agentbox clauded --resume       # Claude with --dangerously-skip-permissions
+agentbox codex                  # Codex with approvals and sandbox bypassed
+agentbox -- setup               # pass reserved word "setup" to Claude
+agentbox --no-update claude     # use the selected release without reconciliation
 ```
 
-**Caveats for any Mac reached over ssh** (this host or another machine):
-listing TCC-protected dirs hangs without full disk access (above), and macOS
-ships no GNU `timeout` — so always bound remote calls from the *client* side
-(`timeout 30 ssh …`); a blocked remote call otherwise hangs the session
-indefinitely.
+After an agent selector, arguments are opaque vendor arguments. `--no-update`
+is an Agentbox option only before the selector. `clauded` and `codex` are
+intentionally dangerous shortcuts: Agentbox adds the vendor's permission or
+sandbox bypass flag before the arguments you supply.
 
-Then, from inside an agentbox session:
+## Lifecycle commands
+
+| Command | Behavior |
+| --- | --- |
+| `agentbox setup` | Prepare, verify, isolated-smoke-test, and select the exact installed release unless a manual rollback hold is active. |
+| `agentbox setup --reset-selector` | After full validation, replace an invalid or held selector with the installed release and discard its previous-selection history. |
+| `agentbox update` | Upgrade the parent Homebrew package, then prepare its pinned release. A checkout prints source-update guidance instead. |
+| `agentbox rollback --accept-vendor-state-risk` | Locally verify and select the immediately previous managed release, acknowledging that vendor-owned state is not reverted. |
+| `agentbox info [--json]` | Show the installed target and active/previous selection without creating state or contacting Docker/network services; an unrendered checkout reports `uninstalled`. |
+| `agentbox doctor [--json]` | Read-only integrity and engine diagnosis. It never runs vendor code, pulls, repairs, or creates a container. |
+| `agentbox --help`, `agentbox --version` | Daemon-independent help and Agentbox version. |
+
+Lifecycle words are reserved. `agentbox -- setup`, for example, sends `setup`
+to Claude instead of invoking the lifecycle command. Leading Claude
+`install`, `update`, and `upgrade` arguments remain blocked even after a
+separator because vendor self-update is forbidden; put those words inside a
+larger prompt instead. Lifecycle usage errors exit 64, operational failures are
+nonzero, and successful checks exit 0. Agent invocations preserve the
+vendor/container exit status and signals.
+
+### Update policy and failure behavior
+
+Only a new Agentbox release changes the runtime or agent versions. Clients do
+not resolve subordinate `latest` channels, and vendor self-update commands are
+blocked with guidance to use `agentbox update`.
+
+A failure before activation keeps the previous selection. Agentbox does not
+automatically roll back after a release has been activated: Claude and Codex
+may already have changed their own configuration, sessions, or databases.
+Explicit rollback changes only the Agentbox-managed selection, only to its
+immediate previous release, and requires `--accept-vendor-state-risk`. It sets
+a manual hold so setup and ordinary launches cannot silently reactivate the
+installed release. After addressing the reason for rollback, use
+`agentbox setup --reset-selector` to validate and select the installed release;
+this deliberately resets the selector and its previous-release history.
+
+## Authentication and persistent state
+
+The container home is persisted at `~/.agentbox` on the host and mounted at
+`/home/node`. Claude and Codex own their normal configuration and authentication
+there, including `.claude`, `.claude.json`, and `.codex`. Agentbox does not
+rewrite, migrate, snapshot, or roll those paths back.
+
+Agentbox owns only `~/.agentbox/runtime`, which contains immutable prepared
+releases, staging data, locks, and one checksummed `activation.json` selector.
+The selected managed directory is mounted read-only into normal sessions. Do
+not edit managed files by hand; use `setup` or `doctor`.
+
+### Claude
+
+Launch `agentbox` and follow Claude Code's interactive sign-in flow. Claude
+state persists in the Agentbox home. Agentbox invokes the release-selected
+binary by absolute path and disables its independent updater.
+
+### Codex
+
+Browser callback login is not supported in v1 and Agentbox publishes no OAuth
+callback port. Use device-code login:
 
 ```sh
-onhost 'cd ~/Code/proj && ./run-macos-smoke.sh'   # run + capture output
-onhost -t 'some-interactive-tool'                  # allocate a real Darwin pty
+agentbox codex login --device-auth
 ```
 
-`setup-host-bridge.sh` creates a dedicated ed25519 key in
-`~/.agentbox/.ssh/id_agentbox_host`, authorizes it, and tests the round-trip. The
-launcher injects the host address (`host.docker.internal`) and your Mac username.
+Alternatively, export `OPENAI_API_KEY` before a Codex launch; it is forwarded
+by environment name only to Codex sessions. It is not forwarded to Claude,
+setup, validation, `doctor`, or `info`. Supported login/logout transitions are
+serialized so concurrent auth changes fail safely.
 
-**Security:** this key grants a full shell as your Mac user (same reach as the
-`/Users` mount). If a machine is lost, remove the key's line from
-`~/.ssh/authorized_keys` and delete `~/.agentbox/.ssh/id_agentbox_host`. Override
-the target with `AGENTBOX_HOST` / `AGENTBOX_HOST_USER`.
+### GitHub
 
-## Status line (Claude)
+When `gh` is available and authenticated on the Mac, the launcher passes its
+live token into the session as the raw `GH_TOKEN` environment variable. The
+agent process and every child process can read and use that token directly.
+The in-container credential helper limits only Git's automatic HTTPS credential
+response to the exact `github.com` host; it is not a security boundary around
+the ambient token. The token is not written into managed release state. Do not
+use an authenticated host `gh` session when that authority should not be given
+to the agent. SSH remotes need separate user configuration; HTTPS is the
+supported default.
 
-`make install` provisions `statusline.sh` (model · dir · git branch · context bar ·
-**quota** · cost · lines changed · elapsed) into Claude's config and registers it in
-`settings.json`. The image ships `jq` + `git`, which it needs. Codex has its own
-TUI and ignores this.
+## Mounts and working directory
 
+Normal sessions preserve macOS paths so tools and diagnostics agree about file
+locations:
+
+| Host | Container | Access |
+| --- | --- | --- |
+| `~/.agentbox` | `/home/node` | read/write vendor home |
+| `~/.agentbox/runtime` | `/home/node/runtime` | read-only managed overlay |
+| selected vendor release | `/opt/agentbox/vendor` | read-only |
+| `/Users` | `/Users` | read/write |
+| `/Volumes` | `/Volumes` | read/write |
+| `/tmp` | `/tmp` | read/write |
+| current directory | same absolute path | working directory through the broad mounts |
+
+When `/Users` exposes the Agentbox home through a second path, the launcher adds
+a second read-only overlay for the managed runtime alias. Authentication and
+other vendor-owned state remain writable.
+
+Preparation uses a different container plan: no network during candidate
+execution, no credentials, repository, broad host mounts, host bridge, ports,
+or live home; a read-only root; and disposable state. Those restrictions apply
+to validation, not to normal agent sessions.
+
+## Security boundary
+
+Agentbox separates personal agent identity and pins executable bytes. It does
+not confine an agent from your Mac's mounted files. In a normal session the
+agent can modify files under `/Users`, `/Volumes`, and `/tmp`, access its
+persistent vendor home, use network access, and—if configured—run commands as
+your Mac user through `onhost`. `clauded` skips Claude permission prompts;
+Codex runs with approvals and its sandbox bypassed.
+
+Treat prompts, repositories, hooks, MCP servers, and tool output as potentially
+host-affecting. Keep secrets out of repositories, review destructive commands,
+and do not present Agentbox as a boundary against malicious agent code or the
+same host account. Digest verification and read-only managed mounts protect
+release selection from accidents; they do not reduce the deliberate authority
+granted to a normal session.
+
+## macOS host bridge
+
+Linux containers cannot execute macOS-only binaries. The optional bridge uses
+a dedicated SSH key to run a command on the Mac:
+
+```sh
+# Homebrew installation:
+agentbox-host-bridge
+
+# Source checkout:
+make docker-build
+./setup-host-bridge.sh --dev-image agentbox-runtime:dev
+
+# From inside Agentbox:
+onhost 'cd ~/Code/project && ./run-macos-smoke.sh'
+onhost -t 'interactive-command'
 ```
-[Opus 4.8] agentbox |  main | █░░░░░░░░░ 11% | 29% 3h  15% 3d | $1.81 | +0/-0 | 13m35s
-                              └ context used   └ quota used, and when it resets:
-                                                 29% of the 5h session (resets in 3h)
-                                                 15% of the 7d week    (resets in 3d)
+
+The source-only `--dev-image` path resolves that mutable tag to its immutable
+local image ID before changing SSH files. The installed command instead reads
+the active digest from `agentbox info --json`; run `agentbox setup` first.
+
+Enable Remote Login first in **System Settings → General → Sharing**. The key
+at `~/.agentbox/.ssh/id_agentbox_host` grants a full shell as your Mac user—the
+same broad authority as the host mounts. To revoke it, remove its marked line
+from `~/.ssh/authorized_keys` and delete the private key. macOS privacy controls
+can block SSH enumeration of Desktop, Documents, and Downloads; grant remote
+users Full Disk Access only if that behavior is wanted.
+
+## Runtime instructions and status line
+
+Agentbox supplies release-owned instructions to each invocation without adding
+instruction files to the repository being edited. Claude's status line is also
+runtime-owned and supplied through session settings rather than by rewriting
+the persistent vendor configuration. Codex retains its own TUI.
+
+## Development
+
+Node.js 22 or newer is used only for repository checks and Husky; it is not an
+end-user runtime dependency.
+
+```sh
+npm ci
+npm run check
+
+# Individual lanes
+npm run test:unit
+npm run test:static
+npm run lint
+npm run format:check
 ```
 
-Both percentages count **up**: 0% on a fresh window, 100% when exhausted — same
-direction as the context bar beside them. Dim below 70%, yellow at 70%, red at 90%.
+Use the development wrapper for commands that need a manifest:
 
-The quota figures come from `.rate_limits` on the JSON that Claude Code pipes to
-the script on stdin — the same numbers `/usage` reports, not an estimate. One
-thing about that payload is easy to get wrong: `resets_at` is a **unix epoch in
-seconds**, not an ISO string (Claude Code has a separate code path that emits ISO
-— don't copy that one). The script handles both shapes anyway.
-
-Claude Code only sends `.rate_limits` on subscription auth (Max/Pro). On an API
-key the whole segment self-hides, so the script is safe to use either way.
-
-**Where it lives:** the script isn't vendored here. It's maintained in
-[zurfyx/dotfiles](https://github.com/zurfyx/dotfiles/blob/main/dot_claude/executable_statusline.sh),
-which installs the same file to the *host's* `~/.claude`; `install.sh` fetches it
-from there so the container home and the host home stay on one copy instead of
-two that drift. Edit it in dotfiles, then re-run `make install` — edits made
-directly to `~/.agentbox/.claude/statusline.sh` are overwritten on the next
-install.
-
-That one step needs network. If the fetch fails, `install.sh` keeps whatever copy
-is already installed; on a fresh machine with nothing to fall back on it skips
-the status line and leaves it unregistered, rather than pointing Claude at a
-command that isn't there. Set `STATUSLINE_URL` to install from a fork, or from a
-local path with `file://`.
-
-## Make targets
-
+```sh
+./scripts/dev.sh setup
+./scripts/dev.sh -- claude --resume
+./scripts/dev.sh --no-build -- codex  # reuse this commit's existing local image
 ```
-make build      Build the image (VERSION=x.y.z CODEX_VERSION=a.b.c to pin)
-make rebuild    Rebuild without cache
-make update     Force both agents to their latest published versions
-make install    Add the shell functions to ~/.zshrc
-make run        Build + run Claude in the current directory
-make run-dangerous  Build + run Claude with --dangerously-skip-permissions
-make run-codex  Build + run Codex in the current directory
-make shell      Bash shell inside the image (debug)
-make host-bridge  Set up the container->macOS-host command bridge (onhost)
-make clean      Remove the image (login/config kept)
-```
+
+`--no-build` still inspects and records the image's immutable local ID; it does
+not make a mutable tag authoritative. `./bin/agentbox --help`, `--version`, and
+`info` remain useful directly from a checkout because they do not prepare or
+launch a release.
+
+The root `VERSION` file is the Agentbox version authority. Development metadata
+and reviewed release inputs must match it. The release process renders the
+final manifest only after it has the multi-platform OCI digest, copies the
+version into `share/agentbox/VERSION`, and then packages
+`agentbox-VERSION.tar.gz`. The Homebrew formula's version, URL, and SHA-256 are
+release outputs. Do not hand-edit a vendor binary into the image or archive.
+
+Docker Desktop integration and real vendor authentication are separate manual
+release checks. CI uses fixtures and must not consume personal credentials.
+
+## License
+
+Agentbox is available under the [MIT License](LICENSE). Claude Code, Codex,
+Docker Desktop, the Debian base, and packaged dependencies retain their own
+licenses and terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

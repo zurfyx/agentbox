@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Trusted, payload-free Agentbox runtime protocol.
+
+The host owns network access and activation.  This program only verifies and
+stages already-downloaded bytes, validates a disposable candidate, or execs an
+already-selected vendor package by its immutable absolute path.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import tarfile
+import unicodedata
+
+
+PROTOCOL = 1
+MAX_ARCHIVE_MEMBERS = 128
+MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
+SHARE_ROOT = Path("/usr/local/share/agentbox")
+VENDOR_ROOT = Path("/opt/agentbox/vendor")
+SHA256_RE = re.compile(r"(?:sha256:)?([0-9a-f]{64})\Z")
+PLATFORMS = {"linux/amd64", "linux/arm64"}
+
+
+class ProtocolError(Exception):
+    pass
+
+
+def fail(message: str) -> "None":
+    raise ProtocolError(message)
+
+
+def canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def load_json(path: Path) -> dict:
+    def unique_pairs(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if key in result:
+                fail(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        fail(f"cannot read manifest: {exc}")
+    if len(raw) > 256 * 1024:
+        fail("manifest exceeds 256 KiB")
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"invalid manifest JSON: {exc}")
+    if not isinstance(value, dict):
+        fail("manifest must be a JSON object")
+    return value
+
+
+def require_keys(value: dict, expected: set[str], where: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        fail(f"{where} keys differ (missing={missing}, unknown={extra})")
+
+
+def digest_value(value: object, where: str) -> str:
+    if not isinstance(value, str):
+        fail(f"{where} must be a SHA-256 string")
+    match = SHA256_RE.fullmatch(value)
+    if not match:
+        fail(f"{where} must be 64 lowercase hex characters")
+    return match.group(1)
+
+
+def selected_platform(entries: object, platform: str, where: str) -> dict:
+    if isinstance(entries, dict):
+        value = entries.get(platform)
+    elif isinstance(entries, list):
+        matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("platform") == platform]
+        value = matches[0] if len(matches) == 1 else None
+    else:
+        value = None
+    if not isinstance(value, dict):
+        fail(f"{where} has no unique entry for {platform}")
+    return value
+
+
+def manifest_contract(manifest: dict, platform: str) -> dict:
+    """Normalize the release-oriented schema and the earlier architecture draft."""
+    if platform not in PLATFORMS:
+        fail(f"unsupported platform: {platform}")
+
+    if manifest.get("schema_version") == 1:
+        if manifest.get("runtime_protocol_version") != PROTOCOL:
+            fail("manifest runtime protocol is not 1")
+        tools = manifest.get("tools")
+        if not isinstance(tools, dict) or set(tools) != {"claude", "codex"}:
+            fail("manifest tools must contain exactly claude and codex")
+        claude = tools["claude"]
+        codex = tools["codex"]
+        if not isinstance(claude, dict) or not isinstance(codex, dict):
+            fail("manifest tool records must be objects")
+        require_keys(claude, {"version", "kind", "platforms"}, "tools.claude")
+        require_keys(
+            codex,
+            {"version", "kind", "layout_version", "entrypoint", "allowed_members", "platforms"},
+            "tools.codex",
+        )
+        if claude["kind"] != "raw-executable" or codex["kind"] != "tar.gz-package":
+            fail("unsupported vendor artifact kind")
+        cp = selected_platform(claude["platforms"], platform, "tools.claude.platforms")
+        xp = selected_platform(codex["platforms"], platform, "tools.codex.platforms")
+        allowed = codex["allowed_members"]
+        entrypoint = codex["entrypoint"]
+        layout = codex["layout_version"]
+    elif manifest.get("schema") == 1:
+        runtime = manifest.get("runtime")
+        artifacts = manifest.get("artifacts")
+        if not isinstance(runtime, dict) or runtime.get("protocol") != PROTOCOL:
+            fail("manifest runtime protocol is not 1")
+        if not isinstance(artifacts, dict) or set(artifacts) != {"claude", "codex"}:
+            fail("manifest artifacts must contain exactly claude and codex")
+        claude = artifacts["claude"]
+        codex = artifacts["codex"]
+        cp = selected_platform(claude.get("platforms"), platform, "artifacts.claude.platforms")
+        xp = selected_platform(codex.get("platforms"), platform, "artifacts.codex.platforms")
+        allowed = xp.get("allowed_members") or xp.get("required_members")
+        entrypoint = "bin/codex"
+        layout = codex.get("package_schema")
+    else:
+        fail("unsupported manifest schema")
+
+    for label, value in (("Claude version", claude.get("version")), ("Codex version", codex.get("version"))):
+        if not isinstance(value, str) or not value or len(value) > 128 or any(c.isspace() for c in value):
+            fail(f"invalid {label}")
+    if layout != 1 or entrypoint != "bin/codex":
+        fail("unsupported Codex package layout")
+    if not isinstance(allowed, list) or not allowed or not all(isinstance(v, str) for v in allowed):
+        fail("Codex allowed_members must be a nonempty string array")
+
+    def artifact(record: dict, label: str) -> dict:
+        size = record.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or not (0 < size <= 512 * 1024 * 1024):
+            fail(f"invalid {label} artifact size")
+        return {"size": size, "sha256": digest_value(record.get("sha256"), f"{label}.sha256")}
+
+    result = {
+        "agentbox_version": manifest.get("agentbox_version"),
+        "claude": {**artifact(cp, "claude"), "version": claude["version"]},
+        "codex": {
+            **artifact(xp, "codex"),
+            "version": codex["version"],
+            "allowed_members": allowed,
+            "target": xp.get("target"),
+        },
+    }
+    if not isinstance(result["agentbox_version"], str) or not result["agentbox_version"]:
+        fail("invalid Agentbox version")
+    return result
+
+
+def ensure_plain_file(path: Path, label: str) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"cannot inspect {label}: {exc}")
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        fail(f"{label} must be one regular, unlinked file")
+    return info
+
+
+def verify_download(path: Path, record: dict, label: str) -> None:
+    info = ensure_plain_file(path, label)
+    if info.st_size != record["size"]:
+        fail(f"{label} size mismatch")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        fail(f"cannot hash {label}: {exc}")
+    if digest.hexdigest() != record["sha256"]:
+        fail(f"{label} SHA-256 mismatch")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def safe_name(name: str) -> str:
+    if not name or "\\" in name or name.startswith("/") or "\x00" in name:
+        fail(f"unsafe archive member: {name!r}")
+    clean = name[:-1] if name.endswith("/") else name
+    raw_parts = clean.split("/")
+    if not raw_parts or any(part in {"", ".", ".."} for part in raw_parts):
+        fail(f"unsafe archive member: {name!r}")
+    return "/".join(raw_parts)
+
+
+def inspect_archive(archive: Path, allowed: list[str]) -> list[tarfile.TarInfo]:
+    canonical_allowed = [safe_name(name) for name in allowed]
+    if len(canonical_allowed) != len(set(canonical_allowed)):
+        fail("manifest contains duplicate Codex members")
+    allowed_set = set(canonical_allowed)
+    allowed_directories = {safe_name(name) for name in allowed if name.endswith("/")}
+    names: set[str] = set()
+    aliases: set[str] = set()
+    expanded = 0
+    try:
+        handle = tarfile.open(archive, mode="r:gz")
+    except (OSError, tarfile.TarError) as exc:
+        fail(f"invalid Codex archive: {exc}")
+    with handle:
+        members = handle.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            fail("Codex archive has too many members")
+        for member in members:
+            name = safe_name(member.name)
+            if name not in allowed_set:
+                fail(f"unexpected Codex archive member: {name}")
+            if member.isdir() != (name in allowed_directories):
+                fail(f"Codex archive member type does not match manifest: {name}")
+            if name in names:
+                fail(f"duplicate Codex archive member: {name}")
+            names.add(name)
+            alias = unicodedata.normalize("NFC", name).casefold()
+            if alias in aliases:
+                fail(f"colliding Codex archive member: {name}")
+            aliases.add(alias)
+            if not (member.isdir() or member.isfile()):
+                fail(f"unsupported Codex archive member type: {name}")
+            if member.isfile():
+                if member.size < 0:
+                    fail(f"negative Codex member size: {name}")
+                expanded += member.size
+                if expanded > MAX_EXPANDED_BYTES:
+                    fail("Codex archive expands beyond 1 GiB")
+        for expected in allowed_set:
+            if expected not in names:
+                fail(f"missing Codex archive member: {expected}")
+        return members
+
+
+def write_regular(source, destination: Path, executable: bool) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(destination, flags, 0o555 if executable else 0o444)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                output.write(block)
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(fd)
+    os.chmod(destination, 0o555 if executable else 0o444, follow_symlinks=False)
+
+
+def extract_codex(archive: Path, destination: Path, allowed: list[str]) -> None:
+    members = inspect_archive(archive, allowed)
+    executable_names = {"bin/codex", "bin/codex-code-mode-host", "codex-path/rg", "codex-resources/bwrap", "codex-resources/zsh/bin/zsh"}
+    destination.mkdir(mode=0o755)
+    with tarfile.open(archive, mode="r:gz") as handle:
+        for member in sorted(members, key=lambda item: (len(PurePosixPath(item.name).parts), item.name)):
+            name = safe_name(member.name)
+            target = destination.joinpath(*PurePosixPath(name).parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True, mode=0o755)
+                continue
+            source = handle.extractfile(member)
+            if source is None:
+                fail(f"cannot read Codex archive member: {name}")
+            with source:
+                write_regular(source, target, name in executable_names)
+
+
+def inventory(root: Path) -> dict:
+    entries: list[dict] = []
+    # Directory modes must not depend on the invoking process's umask. They
+    # remain owner-writable so an abandoned transaction can be cleaned up; the
+    # complete release is exposed to normal sessions through a read-only bind.
+    directories = [path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()]
+    for directory in directories:
+        os.chmod(directory, 0o755, follow_symlinks=False)
+    for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix().encode()):
+        info = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            entries.append({"mode": stat.S_IMODE(info.st_mode), "path": f"vendor/{relative}", "type": "directory"})
+        elif stat.S_ISREG(info.st_mode):
+            entries.append(
+                {
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "path": f"vendor/{relative}",
+                    "sha256": "sha256:" + file_sha256(path),
+                    "size": info.st_size,
+                    "type": "file",
+                }
+            )
+        else:
+            fail(f"staged candidate contains a special file: {relative}")
+    return {"entries": entries, "schema": 1}
+
+
+def command_prepare(args: argparse.Namespace) -> int:
+    manifest = load_json(Path(args.manifest))
+    contract = manifest_contract(manifest, args.platform)
+    downloads = Path(args.downloads)
+    output = Path(args.output)
+    ensure_plain_file(downloads / "claude", "Claude download")
+    ensure_plain_file(downloads / "codex.tar.gz", "Codex download")
+    verify_download(downloads / "claude", contract["claude"], "Claude download")
+    verify_download(downloads / "codex.tar.gz", contract["codex"], "Codex download")
+    if output.exists():
+        fail("candidate output must not already exist")
+    output.mkdir(mode=0o700)
+    (output / "claude").mkdir(mode=0o755)
+    with (downloads / "claude").open("rb") as source:
+        write_regular(source, output / "claude" / "claude", True)
+    extract_codex(downloads / "codex.tar.gz", output / "codex", contract["codex"]["allowed_members"])
+    content = inventory(output)
+    content["manifest_sha256"] = "sha256:" + hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
+    content["platform"] = args.platform
+    content_bytes = canonical_json(content)
+    content_path = output / "content.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(content_path, flags, 0o444)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output_file:
+            output_file.write(content_bytes)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+    finally:
+        os.close(fd)
+    os.chmod(content_path, 0o444, follow_symlinks=False)
+    result = {"content_sha256": "sha256:" + hashlib.sha256(content_bytes).hexdigest(), "ok": True, "protocol": PROTOCOL}
+    sys.stdout.buffer.write(canonical_json(result))
+    return 0
+
+
+def run_probe(command: list[str], expected_version: str) -> tuple[bool, str]:
+    environment = {
+        "HOME": os.environ.get("HOME", "/home/node"),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_AUTOUPDATER": "1",
+        "LANG": "C.UTF-8",
+    }
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    output = result.stdout[:16384].decode("utf-8", "replace")
+    return result.returncode == 0 and expected_version in output, output
+
+
+def image_file_matches(manifest: dict, logical_name: str, path: Path) -> bool:
+    record = manifest.get("managed_files", {}).get(logical_name)
+    if record is None:
+        legacy_name = "runtime_instructions" if logical_name == "runtime_instructions" else "status_line"
+        record = manifest.get(legacy_name)
+    if not isinstance(record, dict):
+        if logical_name == "runtime_instructions":
+            try:
+                return ensure_plain_file(path, logical_name).st_size > 0
+            except ProtocolError:
+                return False
+        return False
+    try:
+        expected = digest_value(record.get("sha256"), f"{logical_name}.sha256")
+        return ensure_plain_file(path, logical_name).st_size > 0 and file_sha256(path) == expected
+    except ProtocolError:
+        return False
+
+
+def candidate_root(path: Path) -> Path:
+    if (path / "claude" / "claude").is_file():
+        return path
+    if (path / "vendor" / "claude" / "claude").is_file():
+        return path / "vendor"
+    return path
+
+
+def validate_codex_layout(root: Path, allowed: list[str]) -> bool:
+    expected_files = {safe_name(name) for name in allowed if not name.endswith("/")}
+    expected_directories = {safe_name(name) for name in allowed if name.endswith("/")}
+    for name in expected_files | expected_directories:
+        parent = PurePosixPath(name).parent
+        while str(parent) != ".":
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
+    expected = expected_files | expected_directories
+    actual: set[str] = set()
+    try:
+        root_info = root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+            return False
+        for parent, directories, files in os.walk(root, followlinks=False):
+            parent_path = Path(parent)
+            for name in directories + files:
+                path = parent_path / name
+                relative = path.relative_to(root).as_posix()
+                info = path.lstat()
+                if relative in expected_directories:
+                    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                        return False
+                elif relative in expected_files:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        return False
+                else:
+                    return False
+                actual.add(relative)
+    except OSError:
+        return False
+    return actual == expected
+
+
+def command_validate(args: argparse.Namespace) -> int:
+    manifest = load_json(Path(args.manifest))
+    contract = manifest_contract(manifest, args.platform)
+    root = candidate_root(Path(args.candidate))
+    claude = root / "claude" / "claude"
+    codex = root / "codex" / "bin" / "codex"
+    try:
+        ensure_plain_file(claude, "Claude candidate")
+        claude_plain = True
+    except ProtocolError:
+        claude_plain = False
+    try:
+        ensure_plain_file(codex, "Codex candidate")
+        codex_plain = True
+    except ProtocolError:
+        codex_plain = False
+    claude_version_ok, _ = run_probe([str(claude), "--version"], contract["claude"]["version"]) if claude_plain else (False, "")
+    claude_help_ok, _ = run_probe([str(claude), "--help"], "") if claude_plain else (False, "")
+    codex_version_ok, _ = run_probe([str(codex), "--version"], contract["codex"]["version"]) if codex_plain else (False, "")
+    codex_help_ok, _ = run_probe([str(codex), "--help"], "") if codex_plain else (False, "")
+    layout_ok = validate_codex_layout(root / "codex", contract["codex"]["allowed_members"])
+    share = SHARE_ROOT
+    if os.environ.get("AGENTBOX_INTERNAL_TESTING") == "1" and os.environ.get("AGENTBOX_TEST_SHARE_ROOT"):
+        share = Path(os.environ["AGENTBOX_TEST_SHARE_ROOT"])
+    assertions = {
+        "claude_behavior": claude_help_ok,
+        "claude_version": claude_version_ok,
+        "codex_behavior": codex_help_ok,
+        "codex_layout": layout_ok,
+        "codex_version": codex_version_ok,
+        "instructions": image_file_matches(manifest, "runtime_instructions", share / "instructions.md"),
+        "runtime_protocol": args.protocol == PROTOCOL,
+        "status_line": image_file_matches(manifest, "statusline", share / "statusline.sh"),
+    }
+    ok = all(assertions.values())
+    result = {
+        "assertions": assertions,
+        "claude_version": contract["claude"]["version"] if claude_version_ok else None,
+        "codex_version": contract["codex"]["version"] if codex_version_ok else None,
+        "ok": ok,
+        "protocol": PROTOCOL,
+    }
+    sys.stdout.buffer.write(canonical_json(result))
+    return 0 if ok else 1
+
+
+def first_command(mode: str, argv: list[str]) -> tuple[str | None, int]:
+    if not argv:
+        return None, -1
+    # Vendor subcommands are the first non-option token.  `--` explicitly ends
+    # option parsing; options whose values are vendor-specific remain opaque.
+    policy_mode = "claude" if mode == "clauded" else mode
+    value_options = {
+        "claude": {
+            "--add-dir", "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file",
+            "--betas", "--debug-file", "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd",
+            "--mcp-config", "--model", "--output-format", "--permission-mode", "--plugin-dir", "--resume",
+            "--session-id", "--settings", "--system-prompt", "--system-prompt-file", "--tools",
+        },
+        "codex": {
+            "-a", "--ask-for-approval", "-c", "--config", "-C", "--cd", "--disable", "--enable", "-i",
+            "--image", "-m", "--model", "--oss-provider", "-p", "--profile", "-s", "--sandbox", "--add-dir",
+        },
+    }[policy_mode]
+    skip_value = False
+    for index, value in enumerate(argv):
+        if skip_value:
+            skip_value = False
+            continue
+        if value == "--":
+            return (argv[index + 1], index + 1) if index + 1 < len(argv) else (None, -1)
+        option = value.split("=", 1)[0]
+        if option in value_options and "=" not in value:
+            skip_value = True
+        elif not value.startswith("-"):
+            return value, index
+    return None, -1
+
+
+def refuse_update(release: str) -> "None":
+    fail(
+        "vendor self-update is disabled for this managed session\n"
+        f"This session is pinned to Agentbox release {release}.\n"
+        "Exit the container and run `agentbox update` on the host to update the complete managed release."
+    )
+
+
+def check_policy(mode: str, argv: list[str], release: str) -> None:
+    command, index = first_command(mode, argv)
+    if mode in {"claude", "clauded"} and command in {"install", "update", "upgrade"}:
+        refuse_update(release)
+    if mode != "codex" or command is None:
+        return
+    if command in {"update", "remote-control", "agents"}:
+        refuse_update(release)
+    if command == "app-server" and index + 1 < len(argv) and argv[index + 1] == "daemon":
+        refuse_update(release)
+    if command == "login":
+        login_args = argv[index + 1 :]
+        supported = {"--device-auth", "--with-api-key", "--with-access-token"}
+        if len(login_args) != 1 or login_args[0] not in supported:
+            fail("browser callback login is unsupported; use `agentbox codex login --device-auth` or `--with-api-key`")
+
+
+def command_run(args: argparse.Namespace) -> int:
+    vendor_args = args.vendor_args
+    if vendor_args and vendor_args[0] == "--":
+        vendor_args = vendor_args[1:]
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}", args.release):
+        fail("invalid Agentbox release identity")
+    check_policy(args.mode, vendor_args, args.release)
+    root = VENDOR_ROOT
+    share = SHARE_ROOT
+    if os.environ.get("AGENTBOX_INTERNAL_TESTING") == "1":
+        if os.environ.get("AGENTBOX_TEST_RELEASE_ROOT"):
+            root = Path(os.environ["AGENTBOX_TEST_RELEASE_ROOT"])
+        if os.environ.get("AGENTBOX_TEST_SHARE_ROOT"):
+            share = Path(os.environ["AGENTBOX_TEST_SHARE_ROOT"])
+    env = os.environ.copy()
+    env["HOME"] = "/home/node"
+    env["DISABLE_UPDATES"] = "1"
+    env["DISABLE_AUTOUPDATER"] = "1"
+    env.pop("CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE", None)
+    for name in (
+        "CODEX_MANAGED_BY_NPM",
+        "CODEX_MANAGED_BY_BUN",
+        "CODEX_MANAGED_BY_PNPM",
+        "CODEX_MANAGED_BY_VITE_PLUS",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "NPM_CONFIG_PREFIX",
+        "BUN_INSTALL",
+    ):
+        env.pop(name, None)
+    env["PATH"] = f"{root}/codex/bin:{root}/claude:{root}/codex/codex-path:/usr/local/bin:/usr/bin:/bin"
+
+    if args.mode in {"claude", "clauded"}:
+        env.pop("OPENAI_API_KEY", None)
+        executable = root / "claude" / "claude"
+        command = [str(executable), "--settings", str(share / "claude-settings.json"), "--append-system-prompt-file", str(share / "instructions.md")]
+        if args.mode == "clauded":
+            command.append("--dangerously-skip-permissions")
+    else:
+        executable = root / "codex" / "bin" / "codex"
+        instructions = (share / "instructions.md").read_text(encoding="utf-8")
+        command = [
+            str(executable),
+            "-c",
+            "check_for_update_on_startup=false",
+            "-c",
+            "developer_instructions=" + json.dumps(instructions, ensure_ascii=False),
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+    ensure_plain_file(executable, "selected vendor executable")
+    os.execvpe(str(executable), command + vendor_args, env)
+    return 127
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="runtime")
+    commands = result.add_subparsers(dest="command", required=True)
+    for name in ("prepare", "validate"):
+        command = commands.add_parser(name)
+        command.add_argument("--protocol", type=int, required=True)
+        command.add_argument("--platform", required=True, choices=sorted(PLATFORMS))
+        command.add_argument("--manifest", required=True)
+        if name == "prepare":
+            command.add_argument("--downloads", required=True)
+            command.add_argument("--output", required=True)
+        else:
+            command.add_argument("--candidate", required=True)
+    run = commands.add_parser("run")
+    run.add_argument("--protocol", type=int, required=True)
+    run.add_argument("--mode", required=True, choices=("claude", "clauded", "codex"))
+    run.add_argument("--release", required=True)
+    run.add_argument("vendor_args", nargs=argparse.REMAINDER)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    if args.protocol != PROTOCOL:
+        fail(f"unsupported runtime protocol: {args.protocol}")
+    if args.command == "prepare":
+        return command_prepare(args)
+    if args.command == "validate":
+        return command_validate(args)
+    return command_run(args)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ProtocolError as exc:
+        print(f"agentbox runtime: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    except (OSError, tarfile.TarError) as exc:
+        print(f"agentbox runtime: operation failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)

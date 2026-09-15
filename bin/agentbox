@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+SELF_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SELF_DIR
+if [[ -r "$SELF_DIR/../libexec/host.sh" ]]; then
+  readonly HOST="$SELF_DIR/../libexec/host.sh"
+elif [[ -r "$SELF_DIR/../libexec/agentbox/host.sh" ]]; then
+  readonly HOST="$SELF_DIR/../libexec/agentbox/host.sh"
+else
+  printf 'agentbox: installation is incomplete (host.sh is missing)\n' >&2
+  exit 70
+fi
+exec /bin/bash "$HOST" "$@"

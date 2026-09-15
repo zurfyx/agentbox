@@ -27,6 +27,22 @@ if [ -z "$HOST_USER" ]; then
   echo "onhost: AGENTBOX_HOST_USER is not set (the launcher injects it; or export it)" >&2
   exit 1
 fi
+case "$HOST_USER" in
+  -* | *[!A-Za-z0-9._-]*)
+    echo "onhost: invalid AGENTBOX_HOST_USER" >&2
+    exit 2
+    ;;
+esac
+case "$HOST" in
+  -* | *[!A-Za-z0-9.:-]*)
+    echo "onhost: invalid AGENTBOX_HOST" >&2
+    exit 2
+    ;;
+esac
+if [ -L "$KEY" ]; then
+  echo "onhost: refusing symlinked key $KEY" >&2
+  exit 1
+fi
 
 TTY_FLAG=""
 if [ "${1:-}" = "-t" ]; then TTY_FLAG="-tt"; shift; fi
@@ -39,7 +55,10 @@ if [ "${1:-}" = "-t" ]; then TTY_FLAG="-tt"; shift; fi
 if [ "$#" -gt 1 ]; then
   q=""
   for a in "$@"; do
-    esc=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+    # The sentinel prevents command substitution from stripping newlines that
+    # are part of the argument; remove only that final sentinel afterwards.
+    esc=$(printf '%sX' "$a" | sed "s/'/'\\\\''/g")
+    esc=${esc%X}
     q="$q '$esc'"
   done
   set -- "$q"

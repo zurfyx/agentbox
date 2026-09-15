@@ -1,0 +1,78 @@
+#compdef agentbox
+
+# zsh completion for Agentbox. Static by design: do not execute agentbox here.
+
+_agentbox() {
+  local first=${words[2]-}
+  local -a root after_no_update report setup rollback
+
+  root=(
+    'claude:run Claude Code'
+    'clauded:run Claude Code without permission prompts'
+    'codex:run Codex without approval prompts or its sandbox'
+    'setup:prepare the installed pinned release'
+    'update:update the Agentbox Homebrew package'
+    'rollback:select the immediately previous managed release'
+    'doctor:check installation and managed-state integrity'
+    'info:show installed and active release information'
+    'help:show Agentbox help'
+    '--no-update:skip lazy installed-release reconciliation'
+    '--help:show Agentbox help'
+    '--version:show the Agentbox version'
+  )
+  after_no_update=(
+    'claude:run Claude Code'
+    'clauded:run Claude Code without permission prompts'
+    'codex:run Codex without approval prompts or its sandbox'
+    '--:pass all following arguments to Claude'
+  )
+  report=(
+    '--json:emit stable JSON'
+  )
+  setup=('--reset-selector:replace invalid or held selection with the installed release')
+  rollback=('--accept-vendor-state-risk:acknowledge that vendor state is not rolled back')
+
+  if ((CURRENT == 2)); then
+    _describe -t agentbox-root 'Agentbox command' root
+    return
+  fi
+
+  if [[ $first == --no-update ]]; then
+    if ((CURRENT == 3)); then
+      _describe -t agentbox-mode 'Agentbox mode' after_no_update
+      return
+    fi
+    first=${words[3]-}
+    case "$first" in
+      claude | clauded | codex | --) _files ;;
+      setup | update | rollback | doctor | info | help | -h | --help | --version) ;;
+      *) _files ;;
+    esac
+    return
+  fi
+
+  case "$first" in
+    claude | clauded | codex | --)
+      _files
+      ;;
+    doctor | info)
+      (( ${words[(I)--json]} )) && report=(${report:#--json:*})
+      _describe -t agentbox-option 'option' report
+      ;;
+    setup)
+      (( ${words[(I)--reset-selector]} )) && setup=()
+      _describe -t agentbox-option 'option' setup
+      ;;
+    rollback)
+      (( ${words[(I)--accept-vendor-state-risk]} )) && rollback=()
+      _describe -t agentbox-option 'option' rollback
+      ;;
+    update | help | -h | --help | --version)
+      ;;
+    *)
+      _files
+      ;;
+  esac
+}
+
+_agentbox "$@"

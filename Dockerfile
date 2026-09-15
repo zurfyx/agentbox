@@ -1,49 +1,48 @@
-# A self-contained image running personal AI coding agents (Claude Code + Codex),
-# isolated from the host's corporate auth/environment. Login + config persist in
-# a mounted volume (~/.agentbox on the host), not inside the image.
-FROM node:22-bookworm
+# Payload-free, digest-selected runtime for Agentbox. Claude and Codex are
+# downloaded by the host from release-manifest URLs and mounted read-only at
+# /opt/agentbox/vendor; no vendor executable is copied into an image layer.
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
-# Versions are required to be concrete: the launcher and Makefile resolve npm's
-# current versions before invoking Docker. A literal "latest" here would make
-# Docker reuse a stale installation layer after the registry tag moves.
-# Install each in its OWN layer: claude-code's postinstall (node install.cjs)
-# downloads a native binary and doesn't complete reliably when co-installed with
-# another package in a single `npm install`.
-ARG CLAUDE_VERSION
-ARG CODEX_VERSION
-RUN test -n "${CLAUDE_VERSION}" \
-  && npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
-RUN test -n "${CODEX_VERSION}" \
-  && npm install -g @openai/codex@${CODEX_VERSION}
+ARG AGENTBOX_VERSION=0.1.0
+ARG SOURCE_COMMIT=unknown
+ARG RUNTIME_PROTOCOL=1
+ARG INSTRUCTIONS_SHA256=0ff973bdd17e72a441e5880a112299ec0e566708862a8b5eae6c68d7e53a0478
+ARG STATUSLINE_SHA256=ebcf9964b8f3741d56034ab95afaca4b1eb9abe78fbd2f59e9b1994cf9468501
 
-# A few niceties the agents commonly shell out to.
+LABEL org.opencontainers.image.title="Agentbox runtime" \
+      org.opencontainers.image.description="Payload-free runtime for release-managed coding agents" \
+      org.opencontainers.image.source="https://github.com/zurfyx/agentbox" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${AGENTBOX_VERSION}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      io.agentbox.runtime-protocol="${RUNTIME_PROTOCOL}" \
+      io.agentbox.instructions-sha256="${INSTRUCTIONS_SHA256}" \
+      io.agentbox.statusline-sha256="${STATUSLINE_SHA256}"
+
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ripgrep less ca-certificates jq openssh-client \
-  && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends \
+       bash ca-certificates git jq less openssh-client python3 ripgrep \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --gid 1000 node \
+  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash node \
+  && install -d -o node -g node -m 0755 /workspace
 
-# Git inside the container: (1) trust bind-mounted repos even though the host
-# uid != the container's node uid (avoids "dubious ownership"), and (2) auth to
-# GitHub over HTTPS using the GH_TOKEN env var injected at runtime.
-COPY git-credential-ghtoken /usr/local/bin/git-credential-ghtoken
-RUN chmod +x /usr/local/bin/git-credential-ghtoken \
+COPY --chmod=0555 runtime/runtime /usr/local/libexec/agentbox/runtime
+COPY --chmod=0555 git-credential-ghtoken onhost /usr/local/bin/
+COPY --chmod=0444 runtime/instructions.md /usr/local/share/agentbox/instructions.md
+COPY --chmod=0555 runtime/statusline.sh /usr/local/share/agentbox/statusline.sh
+COPY --chmod=0444 runtime/claude-settings.json /usr/local/share/agentbox/claude-settings.json
+COPY --chmod=0444 runtime/codex-requirements.toml /etc/codex/requirements.toml
+
+RUN chmod 0555 /usr/local/share/agentbox /etc/codex \
   && git config --system --add safe.directory '*' \
   && git config --system credential.helper ghtoken
 
-# Bridge for running macOS-host-only steps (smoke tests, Darwin pty tests) from
-# inside the container. See onhost + setup-host-bridge.sh + README.
-COPY onhost /usr/local/bin/onhost
-RUN chmod +x /usr/local/bin/onhost
+ENV HOME=/home/node \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    DISABLE_UPDATES=1 \
+    DISABLE_AUTOUPDATER=1
 
-# Disposable container: the agents can't (and shouldn't) update themselves in
-# place — the global install dir isn't writable by `node` and any change is lost
-# on exit. Updates happen by rebuilding the image (the launcher or `make update`).
-# Silence Claude Code's background auto-updater so it doesn't error on every start.
-ENV DISABLE_AUTOUPDATER=1
-
-# Claude Code (and Codex) refuse their --dangerously-* flags as root, so run as
-# the non-root "node" user (uid 1000) that ships with the base image. Its home
-# (/home/node) — holding ~/.claude and ~/.codex — is mounted from the host.
-# No ENTRYPOINT: the launcher passes the agent command (claude/codex) explicitly,
-# so this one image serves both.
 USER node
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/libexec/agentbox/runtime"]

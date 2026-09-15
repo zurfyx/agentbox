@@ -1,0 +1,24 @@
+{
+  "name": "agentbox-dev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development checks for Agentbox",
+  "scripts": {
+    "prepare": "husky",
+    "test": "node --test --test-reporter=spec tests/*.test.mjs",
+    "test:unit": "node --test --test-reporter=spec tests/cli.test.mjs tests/credential.test.mjs tests/state.test.mjs tests/runtime.test.mjs",
+    "test:static": "node --test --test-reporter=spec tests/static.test.mjs",
+    "lint": "tests/check-shell.sh",
+    "format": "node tests/check-format.mjs --write",
+    "format:check": "node tests/check-format.mjs",
+    "precommit": "npm run test:unit && npm run lint",
+    "check": "npm run test && npm run lint && npm run format:check"
+  },
+  "devDependencies": {
+    "@wasm-fmt/shfmt": "0.2.7",
+    "husky": "9.1.7"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
