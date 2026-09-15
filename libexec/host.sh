@@ -413,8 +413,7 @@ launch_agent() {
     done
   fi
   [[ -n $gh_token ]] || printf 'agentbox: warning: no GitHub token; private GitHub HTTPS access will fail\n' >&2
-  local -a docker_args=(run --rm)
-  [[ -t 0 ]] && docker_args+=(-i)
+  local -a docker_args=(run --rm -i)
   [[ -t 1 ]] && docker_args+=(-t)
   docker_args+=(--mount "type=bind,src=$home,dst=/home/node" --mount "type=bind,src=$physical_root,dst=/home/node/runtime,readonly" --mount "type=bind,src=$physical_root,dst=$physical_root,readonly" --mount "type=bind,src=$release/vendor,dst=/opt/agentbox/vendor,readonly" --mount "type=bind,src=$release/manifest.json,dst=/opt/agentbox/release/manifest.json,readonly")
   [[ $root == "$physical_root" ]] || docker_args+=(--mount "type=bind,src=$physical_root,dst=$root,readonly")

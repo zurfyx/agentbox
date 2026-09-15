@@ -429,9 +429,55 @@ def run_checked(argv: list[str], *, capture: bool = False, timeout: int = 900, c
         fail(f"could not execute runtime engine: {exc}")
 
 def ensure_root(root: Path) -> None:
+    qualify_root(root)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700, follow_symlinks=False)
     for name in ("releases", "staging", "locks"):
         (root / name).mkdir(mode=0o700, exist_ok=True)
+        os.chmod(root / name, 0o700, follow_symlinks=False)
+    qualify_root(root)
+
+def qualify_root(root: Path) -> None:
+    if not root.is_absolute() or any(part in (".", "..") for part in root.parts):
+        fail("managed root must be an absolute normalized path")
+    current = Path(root.anchor)
+    existing = current
+    for part in root.parts[1:]:
+        current /= part
+        try: info = current.lstat()
+        except FileNotFoundError: break
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail(f"managed root ancestry is not a plain directory: {current}")
+        existing = current
+    for managed in (root.parent, root):
+        try: info = managed.lstat()
+        except FileNotFoundError: continue
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            fail(f"managed root path is not a plain directory: {managed}")
+        if info.st_uid != os.getuid():
+            fail(f"managed root path is not owned by the invoking user: {managed}")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            fail(f"managed root path is writable by another user: {managed}")
+    if sys.platform == "darwin":
+        try:
+            mounts = subprocess.run(["/sbin/mount"], env={"PATH": "/usr/bin:/bin:/sbin", "LC_ALL": "C"},
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, timeout=10, check=True).stdout.splitlines()
+            device = existing.stat().st_dev
+            candidates: list[tuple[int, str]] = []
+            for line in mounts:
+                match = re.match(r"^.+ on (.+) \(([^)]*)\)$", line)
+                if match is None: continue
+                mountpoint, options = match.groups()
+                try: mount_device = Path(mountpoint).stat().st_dev
+                except OSError: continue
+                if mount_device == device: candidates.append((len(mountpoint), options))
+            if not candidates: fail("managed root filesystem could not be identified")
+            options = max(candidates)[1].split(", ")
+            if options[0] != "apfs" or "local" not in options:
+                fail("managed root must be on a local APFS filesystem")
+        except (OSError, subprocess.SubprocessError) as exc:
+            fail(f"managed root filesystem qualification failed: {exc}")
 
 def activate(root: Path, manifest: dict[str, Any], digest: str, release: Path, content_hash: str, validation_hash: str,
              development: bool = False, reset_selector: bool = False) -> dict[str, Any]:
@@ -617,7 +663,7 @@ def main() -> int:
     execute = sub.add_parser("exec-engine"); execute.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if hasattr(args, "root"):
-        args.root = args.root.resolve()
+        qualify_root(args.root)
     if args.command in {"validate-manifest", "inspect", "current-field", "launch-plan", "prepare", "rollback"}:
         if not isinstance(args.expected_version, str) or not VERSION_RE.fullmatch(args.expected_version):
             fail("a valid --expected-version is required for state and manifest operations")

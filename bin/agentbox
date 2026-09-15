@@ -1,6 +1,21 @@
 #!/bin/bash
 set -euo pipefail
-SELF_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
+for _ in {1..40}; do
+  [[ -L $SELF ]] || break
+  SELF_DIR="$(cd -P -- "$(dirname -- "$SELF")" && pwd)"
+  TARGET="$(/usr/bin/readlink "$SELF")"
+  if [[ $TARGET == /* ]]; then
+    SELF="$TARGET"
+  else
+    SELF="$SELF_DIR/$TARGET"
+  fi
+done
+[[ ! -L $SELF ]] || {
+  printf 'agentbox: launcher symlink chain is too deep\n' >&2
+  exit 70
+}
+SELF_DIR="$(cd -P -- "$(dirname -- "$SELF")" && pwd)"
 readonly SELF_DIR
 if [[ -r "$SELF_DIR/../libexec/host.sh" ]]; then
   readonly HOST="$SELF_DIR/../libexec/host.sh"

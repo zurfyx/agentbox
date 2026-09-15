@@ -225,7 +225,7 @@ test("launch matrix constructs exact protocol and preserves argv", async (t) => 
       assert.ok(argv.some((arg) => arg.endsWith("dst=/home/node/runtime,readonly")));
       assert.ok(argv.some((arg) => arg.endsWith(`dst=${prepared.home}/runtime,readonly`)));
       assert.ok(argv.some((arg) => arg.includes("dst=/opt/agentbox/vendor,readonly")));
-      assert.equal(argv.includes("-i"), false);
+      assert.equal(argv.includes("-i"), true);
       assert.equal(argv.includes("-t"), false);
       assert.equal(argv.includes("-p"), false);
       assert.equal(argv.includes("github-secret-value"), false);
@@ -268,6 +268,34 @@ exec '${CLI}' claude tty-check
   const argv = readNul(engine.argv);
   assert.ok(argv.includes("-i"));
   assert.ok(argv.includes("-t"));
+});
+
+test("non-TTY launches keep piped stdin attached", (t) => {
+  const prepared = fixture(t);
+  const engine = recordingEngine(prepared.dir, 0);
+  const stdinRecord = resolve(prepared.dir, "stdin");
+  writeExecutable(
+    engine.path,
+    `#!/bin/sh
+if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
+printf '%s\\0' "$@" > '${engine.argv}'
+env > '${engine.environment}'
+cat > '${stdinRecord}'
+`,
+  );
+  const result = run(CLI, ["codex", "login", "--with-api-key"], {
+    input: "stdin-sentinel\n",
+    env: {
+      AGENTBOX_TEST_MODE: "1",
+      AGENTBOX_TEST_MANIFEST: prepared.manifestPath,
+      AGENTBOX_TEST_ENGINE: engine.path,
+      AGENTBOX_HOME: prepared.home,
+      GH_TOKEN: "test",
+    },
+  });
+  expectExit(result, 0, "piped stdin launch");
+  assert.ok(readNul(engine.argv).includes("-i"));
+  assert.equal(readFileSync(stdinRecord, "utf8"), "stdin-sentinel\n");
 });
 
 test("Codex callback login is rejected before engine access", (t) => {
