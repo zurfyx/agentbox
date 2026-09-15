@@ -197,6 +197,7 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
   assert.match(workflow, /gh api --method DELETE/);
   assert.match(workflow, /\.name == "required" and \.app\.slug == "github-actions"/);
   assert.match(workflow, /--match-head-commit "\$head"/);
+  assert.match(workflow, /gh pr list --repo "\$repo" --head "\$branch" --state open/);
 
   const updater = read(".github/workflows/update.yml");
   assert.match(updater, /\.name == "required" and \.app\.slug == "github-actions"/);
