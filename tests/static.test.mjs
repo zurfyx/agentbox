@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -13,6 +14,7 @@ import test from "node:test";
 import { ROOT, expectExit, run, tempDir, writeExecutable } from "./helpers.mjs";
 
 const read = (path) => readFileSync(resolve(ROOT, path), "utf8");
+const VERSION = read("VERSION").trim();
 
 test("distribution entry points and hooks are executable", () => {
   for (const path of [
@@ -26,6 +28,23 @@ test("distribution entry points and hooks are executable", () => {
     assert.ok(existsSync(resolve(ROOT, path)), `${path} is missing`);
     assert.ok(statSync(resolve(ROOT, path)).mode & 0o111, `${path} is not executable`);
   }
+});
+
+test("launcher resolves the Homebrew bin symlink before locating libexec", (t) => {
+  const dir = tempDir(t);
+  const keg = resolve(dir, "Cellar/agentbox/0.1.0");
+  mkdirSync(resolve(keg, "bin"), { recursive: true });
+  mkdirSync(resolve(keg, "libexec/agentbox"), { recursive: true });
+  mkdirSync(resolve(keg, "share/agentbox"), { recursive: true });
+  mkdirSync(resolve(dir, "bin"), { recursive: true });
+  copyFileSync(resolve(ROOT, "bin/agentbox"), resolve(keg, "bin/agentbox"));
+  copyFileSync(resolve(ROOT, "libexec/host.sh"), resolve(keg, "libexec/agentbox/host.sh"));
+  copyFileSync(resolve(ROOT, "libexec/state.py"), resolve(keg, "libexec/agentbox/state.py"));
+  writeFileSync(resolve(keg, "share/agentbox/VERSION"), `${VERSION}\n`);
+  symlinkSync("../Cellar/agentbox/0.1.0/bin/agentbox", resolve(dir, "bin/agentbox"));
+  const result = run(resolve(dir, "bin/agentbox"), ["--version"]);
+  expectExit(result, 0, "Homebrew-style symlink launch");
+  assert.equal(result.stdout.trim(), `agentbox ${VERSION}`);
 });
 
 test("all authored shell and Python programs parse", () => {
@@ -150,6 +169,7 @@ test("host consumes one integrity-checked launch tuple", () => {
   const state = read("libexec/state.py");
   assert.match(state, /timeout\s*=\s*180/);
   assert.match(state, /timeout(?:: int)?\s*=\s*900/);
+  assert.match(state, /managed root must be on a local APFS filesystem/);
 });
 
 test("release workflow smokes the exact entrypoint with step-scoped tokens", () => {

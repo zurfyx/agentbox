@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -192,6 +193,23 @@ test("inspect of absent state is observational", (t) => {
   expectExit(result, 0, "absent state inspection");
   assert.equal(JSON.parse(result.stdout).state, "absent");
   assert.equal(existsSync(root), false);
+});
+
+test("managed root rejects symlink ancestry and unsafe ownership modes", (t) => {
+  const dir = tempDir(t);
+  const actual = resolve(dir, "actual");
+  mkdirSync(actual);
+  symlinkSync(actual, resolve(dir, "linked"));
+  const linked = state(["inspect", "--root", resolve(dir, "linked/runtime")]);
+  assert.equal(linked.status, 65);
+  assert.match(linked.stderr, /not a plain directory/);
+
+  const shared = resolve(dir, "shared");
+  mkdirSync(shared, { mode: 0o777 });
+  chmodSync(shared, 0o777);
+  const unsafe = state(["inspect", "--root", resolve(shared, "runtime")]);
+  assert.equal(unsafe.status, 65);
+  assert.match(unsafe.stderr, /writable by another user/);
 });
 
 test("activation is coherent, idempotent, and retains last good on failure", async (t) => {

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,7 +44,7 @@ export function expectExit(result, status, context = "command") {
 }
 
 export function tempDir(t) {
-  const path = mkdtempSync(resolve(tmpdir(), "agentbox-test-"));
+  const path = realpathSync(mkdtempSync(resolve(tmpdir(), "agentbox-test-")));
   t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }

@@ -56,11 +56,6 @@ brew install zurfyx/tap/agentbox
 agentbox setup
 ```
 
-The public tap, release asset, and GHCR visibility have not completed their
-live publication canaries yet. Treat that command as the release interface,
-not as a currently qualified installation path. Use the source workflow below
-for development until a release is published.
-
 The formula installs Bash, zsh, and fish completions without editing shell
 startup files. Homebrew's normal shell integration discovers them.
 
@@ -147,8 +142,10 @@ rewrite, migrate, snapshot, or roll those paths back.
 
 Agentbox owns only `~/.agentbox/runtime`, which contains immutable prepared
 releases, staging data, locks, and one checksummed `activation.json` selector.
-The selected managed directory is mounted read-only into normal sessions. Do
-not edit managed files by hand; use `setup` or `doctor`.
+The managed root must be a plain, user-owned directory on local APFS; symlinked
+or group/world-writable roots are rejected. The selected managed directory is
+mounted read-only into normal sessions. Do not edit managed files by hand; use
+`setup` or `doctor`.
 
 ### Claude
 
