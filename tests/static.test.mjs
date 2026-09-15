@@ -157,7 +157,11 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
   assert.match(workflow, /Smoke the exact runtime entrypoint on both platforms/);
   assert.match(
     workflow,
-    /docker run --rm --platform "\$platform"[\s\\]*"\$IMAGE@\$INDEX_DIGEST" --help/,
+    /docker run --rm --platform linux\/amd64[\s\\]*"\$IMAGE@\$\{\{ steps\.identities\.outputs\.amd64 \}\}" --help/,
+  );
+  assert.match(
+    workflow,
+    /docker run --rm --platform linux\/arm64[\s\\]*"\$IMAGE@\$\{\{ steps\.identities\.outputs\.arm64 \}\}" --help/,
   );
   const jobHeader = workflow.slice(
     workflow.indexOf("  publish:"),
