@@ -30,7 +30,9 @@ class Agentbox < Formula
     assert_predicate bin/"agentbox-host-bridge", :executable?
     assert_match "usage: agentbox-host-bridge", shell_output("#{bin}/agentbox-host-bridge --help")
     assert_match "agentbox #{version}", shell_output("#{bin}/agentbox --version")
-    assert_match "agentbox #{version}", shell_output("#{HOMEBREW_PREFIX}/bin/agentbox --version") if (HOMEBREW_PREFIX/"bin/agentbox").symlink?
+    if (HOMEBREW_PREFIX/"bin/agentbox").symlink?
+      assert_match "agentbox #{version}", shell_output("#{HOMEBREW_PREFIX}/bin/agentbox --version")
+    end
     help = shell_output("#{bin}/agentbox --help")
     assert_match "usage:", help
     assert_match "rollback --accept-vendor-state-risk", help
