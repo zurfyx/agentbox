@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       replace_unpublished_image:
-        description: Replace a private vX.Y.Z image left by a failed unpublished release
+        description: Replace a vX.Y.Z image left by a failed unpublished release
         required: false
         default: false
         type: boolean
@@ -112,16 +112,20 @@ jobs:
           index=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor")
           images=$(docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Image}}')
           matches_source=true
+          replaceable_orphan=true
           for platform in linux/amd64 linux/arm64; do
             labels=$(jq -er --arg platform "$platform" '.[$platform].config.Labels' <<<"$images")
-            [[ "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" == "https://github.com/$GITHUB_REPOSITORY" ]] || matches_source=false
-            [[ "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" == "$SOURCE_COMMIT" ]] || matches_source=false
-            [[ "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" == "$VERSION" ]] || matches_source=false
-            [[ "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" == MIT ]] || matches_source=false
-            [[ "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" == 1 ]] || matches_source=false
-            [[ "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.instructions_sha }}' ]] || matches_source=false
-            [[ "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.statusline_sha }}' ]] || matches_source=false
+            revision=$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")
+            [[ $revision == "$SOURCE_COMMIT" ]] || matches_source=false
+            [[ $revision =~ ^[0-9a-f]{40}$ ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" == "https://github.com/$GITHUB_REPOSITORY" ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" == "$VERSION" ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" == MIT ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" == 1 ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.instructions_sha }}' ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.statusline_sha }}' ]] || replaceable_orphan=false
           done
+          [[ $replaceable_orphan == true ]] || matches_source=false
           if [[ $matches_source != true ]]; then
             [[ $REPLACE_UNPUBLISHED_IMAGE == true ]] || {
               echo "v$VERSION exists but does not match the requested immutable source" >&2
@@ -132,16 +136,19 @@ jobs:
               echo "refusing to replace an image with an existing tag or release" >&2
               exit 1
             fi
-            test "$(gh api "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime" --jq .visibility)" = private || {
-              echo "refusing to replace a non-private image" >&2
+            [[ $replaceable_orphan == true ]] || {
+              echo "refusing to replace an image whose Agentbox metadata differs beyond revision" >&2
               exit 1
             }
+            visibility=$(gh api "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime" --jq .visibility)
+            [[ $visibility == private || $visibility == public ]] || { echo "unknown package visibility" >&2; exit 1; }
             candidate=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.metadata.container.tags | index($tag))] | if length == 1 then .[0] else error("expected one tagged package version") end' <<<"$versions")
             test "$(jq -c '.metadata.container.tags | sort' <<<"$candidate")" = "[\"v$VERSION\"]" || {
               echo "refusing to replace a package version carrying additional tags" >&2
               exit 1
             }
             version_id=$(jq -er '.id | select(type == "number")' <<<"$candidate")
+            echo "Replacing $visibility unpublished v$VERSION package version $version_id" >&2
             gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions/$version_id"
             echo 'present=false' >>"$GITHUB_OUTPUT"
             exit 0

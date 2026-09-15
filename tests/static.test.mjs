@@ -191,7 +191,7 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
   assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(workflow, /GH_TOKEN: \$\{\{ steps\.tap-token\.outputs\.token \}\}/);
   assert.match(workflow, /replace_unpublished_image:/);
-  assert.match(workflow, /refusing to replace a non-private image/);
+  assert.match(workflow, /metadata differs beyond revision/);
   assert.match(workflow, /releases\/tags\/v\$VERSION/);
   assert.match(workflow, /gh api --method DELETE/);
   assert.match(workflow, /\.name == "required" and \.app\.slug == "github-actions"/);
