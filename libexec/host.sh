@@ -72,6 +72,12 @@ trusted_helper_path() {
   case "$candidate" in
     /opt/homebrew/bin/*) cellar=/opt/homebrew/Cellar ;;
     /usr/local/bin/*) cellar=/usr/local/Cellar ;;
+    /usr/bin/* | /bin/*)
+      target="$(cd -P -- "$(dirname -- "$candidate")" && pwd)/$(basename -- "$candidate")"
+      [[ $target == /usr/bin/* || $target == /bin/* ]] || return 1
+      printf '%s\n' "$target"
+      return
+      ;;
     *) return 1 ;;
   esac
   target="$(/usr/bin/readlink "$candidate")" || return 1

@@ -129,4 +129,11 @@ docker run "${common[@]}" \
   "$image" run --protocol 1 --mode claude --release "$VERSION" -- smoke-sentinel |
   grep -F smoke-sentinel > /dev/null
 
+# The runtime runs as uid 1000, while GitHub's Linux runner commonly owns the
+# checkout as uid 1001. Restore cleanup access without requiring sudo on the
+# host and without weakening the production mount contract.
+docker run --rm --platform "$platform" --user root \
+  --mount "type=bind,src=$tmp_dir/output,dst=/run/agentbox/output" \
+  --entrypoint /bin/chmod "$image" -R ugo+rwX /run/agentbox/output
+
 printf 'runtime smoke passed for %s\n' "$platform"
