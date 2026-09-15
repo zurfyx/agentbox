@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system checks
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck shfmt
+      - name: Install locked development dependencies
+        run: npm ci --ignore-scripts
+      - name: Run authoritative checks
+        run: make check
+
+  host:
+    name: host (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install host dependencies
+        run: brew install bash jq shellcheck shfmt
+      - name: Install locked development dependencies
+        run: npm ci --ignore-scripts
+      - name: Run host checks
+        run: make check
+
+  runtime:
+    name: runtime (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Build runtime platform without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: agentbox-runtime:ci
+          provenance: false
+          sbom: false
+      - name: Smoke non-root payload-free image
+        run: |
+          test "$(docker run --rm --entrypoint id agentbox-runtime:ci -u)" != 0
+          docker run --rm --entrypoint /bin/sh agentbox-runtime:ci -eu -c \
+            '! command -v claude && ! command -v codex && test ! -e /usr/local/lib/node_modules/@anthropic-ai/claude-code && test ! -e /usr/local/lib/node_modules/@openai/codex'
+          docker run --rm agentbox-runtime:ci --help | grep -F 'prepare'
+      - name: Smoke prepare, validate, and run protocol
+        run: scripts/smoke-runtime.sh agentbox-runtime:ci '${{ matrix.platform }}'
+
+  candidate:
+    name: real vendor candidate (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download and validate exact candidates without credentials
+        env:
+          AGENTBOX_HOME: ${{ runner.temp }}/agentbox-candidate-home
+        run: scripts/dev.sh -- setup
+
+  required:
+    name: required
+    if: ${{ always() }}
+    needs: [quality, host, runtime, candidate]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require every CI lane
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          HOST: ${{ needs.host.result }}
+          RUNTIME: ${{ needs.runtime.result }}
+          CANDIDATE: ${{ needs.candidate.result }}
+        run: |
+          test "$QUALITY" = success
+          test "$HOST" = success
+          test "$RUNTIME" = success
+          test "$CANDIDATE" = success

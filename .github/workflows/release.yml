@@ -1,0 +1,422 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Agentbox version (X.Y.Z)
+        required: true
+        type: string
+      source_commit:
+        description: Exact protected-main commit (40 lowercase hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build or verify immutable runtime
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      index: ${{ steps.identities.outputs.index }}
+      amd64: ${{ steps.identities.outputs.amd64 }}
+      arm64: ${{ steps.identities.outputs.arm64 }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/agentbox-runtime
+      VERSION: ${{ inputs.version }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - name: Check out the exact requested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove protected-main source, inputs, CI, and uniqueness
+        id: prerequisites
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(< VERSION)" = "$VERSION"
+          test "$(jq -er .agentbox_version release-inputs.json)" = "$VERSION"
+          test "$(jq -er .version package.json)" = "$VERSION"
+          test "$(jq -er .version package-lock.json)" = "$VERSION"
+          test "$(jq -er '.packages[""].version' package-lock.json)" = "$VERSION"
+          test "$(jq -er .runtime.image_repository release-inputs.json)" = "$IMAGE"
+          instructions_sha=$(sha256sum runtime/instructions.md | awk '{print $1}')
+          statusline_sha=$(sha256sum runtime/statusline.sh | awk '{print $1}')
+          test "$(jq -er .managed_files.runtime_instructions.sha256 release-inputs.json)" = "$instructions_sha"
+          test "$(jq -er .managed_files.statusline.sha256 release-inputs.json)" = "$statusline_sha"
+          echo "instructions_sha=$instructions_sha" >>"$GITHUB_OUTPUT"
+          echo "statusline_sha=$statusline_sha" >>"$GITHUB_OUTPUT"
+          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          test "$default_branch" = main
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$SOURCE_COMMIT"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SOURCE_COMMIT/check-runs?per_page=100" |
+            jq -e '[.check_runs[] | select(.name == "CI / required" and .conclusion == "success")] | length > 0' >/dev/null
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" 2>/dev/null || printf '[]')
+          protection=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
+          contexts=$(
+            {
+              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
+              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
+            } | LC_ALL=C sort -u
+          )
+          grep -Fx 'CI / required' <<<"$contexts" >/dev/null || {
+            echo "main is not protected by the aggregate 'CI / required' check" >&2
+            exit 1
+          }
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reuse only a matching existing runtime image
+        id: existing-image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          owner_type=$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type)
+          if [[ "$owner_type" == Organization ]]; then package_scope=orgs; else package_scope=users; fi
+          set +e
+          versions=$(gh api --paginate --slurp "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions?per_page=100" 2>/tmp/package-error)
+          package_status=$?
+          set -e
+          if ((package_status != 0)); then
+            grep -F 'HTTP 404' /tmp/package-error >/dev/null || { cat /tmp/package-error >&2; exit "$package_status"; }
+            echo 'present=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! jq -e --arg tag "v$VERSION" '[.[][] | .metadata.container.tags[]?] | index($tag) != null' <<<"$versions" >/dev/null; then
+            echo 'present=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          descriptor=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest}}')
+          index=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor")
+          images=$(docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Image}}')
+          for platform in linux/amd64 linux/arm64; do
+            labels=$(jq -er --arg platform "$platform" '.[$platform].config.Labels' <<<"$images")
+            test "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" = "https://github.com/$GITHUB_REPOSITORY"
+            test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = "$SOURCE_COMMIT"
+            test "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" = "$VERSION"
+            test "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" = MIT
+            test "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" = 1
+            test "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" = '${{ steps.prerequisites.outputs.instructions_sha }}'
+            test "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" = '${{ steps.prerequisites.outputs.statusline_sha }}'
+          done
+          echo 'present=true' >>"$GITHUB_OUTPUT"
+          echo "index=$index" >>"$GITHUB_OUTPUT"
+      - name: Build and publish the exact multi-architecture runtime
+        if: steps.existing-image.outputs.present != 'true'
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:v${{ env.VERSION }}
+          build-args: |
+            AGENTBOX_VERSION=${{ env.VERSION }}
+            SOURCE_COMMIT=${{ env.SOURCE_COMMIT }}
+            RUNTIME_PROTOCOL=1
+            INSTRUCTIONS_SHA256=${{ steps.prerequisites.outputs.instructions_sha }}
+            STATUSLINE_SHA256=${{ steps.prerequisites.outputs.statusline_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SOURCE_COMMIT }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=MIT
+          provenance: mode=max
+          sbom: true
+      - name: Resolve and verify exact OCI identities
+        id: identities
+        env:
+          INDEX_DIGEST: ${{ steps.existing-image.outputs.index || steps.image.outputs.digest }}
+        run: |
+          [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$INDEX_DIGEST" --raw > /tmp/index.json
+          amd64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64" and (.platform.variant // "") == "") | .digest] | if length == 1 then .[0] else error("expected one amd64 manifest") end' /tmp/index.json)
+          arm64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64" and (.platform.variant // "") == "") | .digest] | if length == 1 then .[0] else error("expected one arm64 manifest") end' /tmp/index.json)
+          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "index=$INDEX_DIGEST" >>"$GITHUB_OUTPUT"
+          echo "amd64=$amd64" >>"$GITHUB_OUTPUT"
+          echo "arm64=$arm64" >>"$GITHUB_OUTPUT"
+      - name: Smoke the exact runtime entrypoint on both platforms
+        env:
+          INDEX_DIGEST: ${{ steps.identities.outputs.index }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" \
+              "$IMAGE@$INDEX_DIGEST" --help | grep -F 'prepare'
+          done
+      - name: Verify anonymous exact-digest consumption
+        run: |
+          install -d -m 0700 /tmp/anonymous-docker-config
+          docker --config /tmp/anonymous-docker-config buildx imagetools inspect \
+            "$IMAGE@${{ steps.identities.outputs.index }}" >/dev/null
+
+  publish:
+    name: Publish or verify immutable release
+    if: github.ref == 'refs/heads/main'
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ inputs.version }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - name: Check out the exact requested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Render manifest and deterministic release assets
+        run: |
+          scripts/release.sh \
+            --version "$VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --index-digest '${{ needs.image.outputs.index }}' \
+            --amd64-digest '${{ needs.image.outputs.amd64 }}' \
+            --arm64-digest '${{ needs.image.outputs.arm64 }}' \
+            --output-dir dist
+      - name: Mint scoped release App token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AGENTBOX_APP_ID }}
+          private-key: ${{ secrets.AGENTBOX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - name: Create or resume a matching draft release
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: |
+          verify_tag() {
+            local object type sha
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION")
+            type=$(jq -er .object.type <<<"$object")
+            sha=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha")
+              type=$(jq -er .object.type <<<"$object")
+              sha=$(jq -er .object.sha <<<"$object")
+            fi
+            [[ "$type" == commit && "$sha" == "$SOURCE_COMMIT" ]]
+          }
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          matches=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' <<<"$releases")
+          count=$(jq 'length' <<<"$matches")
+          ((count <= 1)) || { echo "multiple releases use tag v$VERSION" >&2; exit 1; }
+          if ((count == 0)); then
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+              verify_tag || { echo "existing tag does not identify the requested source commit" >&2; exit 1; }
+              target_args=(--verify-tag)
+            else
+              target_args=(--target "$SOURCE_COMMIT")
+            fi
+            gh release create "v$VERSION" "${target_args[@]}" \
+              --draft --title "Agentbox v$VERSION" --generate-notes
+            releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+            matches=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' <<<"$releases")
+            [[ "$(jq 'length' <<<"$matches")" == 1 ]]
+          fi
+          release=$(jq -c '.[0]' <<<"$matches")
+          jq -e --arg source "$SOURCE_COMMIT" --arg title "Agentbox v$VERSION" '
+            .target_commitish == $source and .name == $title and
+            (.draft | type == "boolean") and .prerelease == false
+          ' <<<"$release" >/dev/null || { echo "existing release metadata differs" >&2; exit 1; }
+          if [[ "$(jq -r .draft <<<"$release")" == false ]]; then
+            verify_tag || { echo "existing release tag does not identify the requested source commit" >&2; exit 1; }
+          fi
+          expected=$(printf 'agentbox-%s.provenance.json\nagentbox-%s.tar.gz\nagentbox-%s.tar.gz.sha256' \
+            "$VERSION" "$VERSION" "$VERSION")
+          actual=$(jq -r '.assets[].name' <<<"$release" | LC_ALL=C sort)
+          unexpected=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))
+          [[ -z "$unexpected" ]] || {
+            echo "existing release has unexpected assets" >&2
+            exit 1
+          }
+          mkdir -p /tmp/existing-release
+          for asset in \
+            "agentbox-$VERSION.tar.gz" \
+            "agentbox-$VERSION.tar.gz.sha256" \
+            "agentbox-$VERSION.provenance.json"; do
+            asset_id=$(jq -r --arg asset "$asset" '[.assets[] | select(.name == $asset)] | if length == 1 then .[0].id else empty end' <<<"$release")
+            if [[ -n "$asset_id" ]]; then
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"/tmp/existing-release/$asset"
+              cmp -s "dist/$asset" "/tmp/existing-release/$asset" || {
+                echo "existing release asset differs: $asset" >&2
+                exit 1
+              }
+            else
+              [[ "$(jq -r .draft <<<"$release")" == true ]] || {
+                echo "published release is missing asset: $asset" >&2
+                exit 1
+              }
+              gh release upload "v$VERSION" "dist/$asset"
+            fi
+          done
+          release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("release disappeared") end')
+          actual=$(jq -r '.assets[].name' <<<"$release" | LC_ALL=C sort)
+          [[ "$actual" == "$expected" ]] || { echo "release asset set is incomplete" >&2; exit 1; }
+          if [[ "$(jq -r .draft <<<"$release")" == true ]]; then
+            gh release edit "v$VERSION" --draft=false
+          fi
+          verify_tag || { echo "published release tag does not identify the requested source commit" >&2; exit 1; }
+      - name: Mint separately scoped tap App token
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AGENTBOX_APP_ID }}
+          private-key: ${{ secrets.AGENTBOX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Check out tap main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          ref: main
+          path: tap
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.tap-token.outputs.token }}
+      - name: Open exact Homebrew formula proposal
+        id: tap-pr
+        working-directory: tap
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          APP_SLUG: ${{ steps.tap-token.outputs.app-slug }}
+        run: |
+          ARCHIVE_SHA=$(awk '{print $1}' "../dist/agentbox-$VERSION.tar.gz.sha256")
+          export ARCHIVE_SHA
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path("Formula/agentbox.rb")
+          text = path.read_text()
+          version = os.environ["VERSION"]
+          sha = os.environ["ARCHIVE_SHA"]
+          url = f"https://github.com/zurfyx/agentbox/releases/download/v{version}/agentbox-{version}.tar.gz"
+          text, url_count = re.subn(r'^  url ".*"$', f'  url "{url}"', text, flags=re.MULTILINE)
+          text, sha_count = re.subn(r'^  sha256 "[0-9a-f]{64}"$', f'  sha256 "{sha}"', text, flags=re.MULTILINE)
+          text, version_count = re.subn(r'^  version ".*"$', f'  version "{version}"', text, flags=re.MULTILINE)
+          if (url_count, sha_count, version_count) != (1, 1, 1):
+              raise SystemExit("formula does not have exactly one url/sha256/version field")
+          path.write_text(text)
+          PY
+          mapfile -t changed < <(git diff --name-only)
+          if ((${#changed[@]} == 0)); then
+            echo 'present=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ((${#changed[@]} == 1)) && [[ "${changed[0]}" == Formula/agentbox.rb ]]
+          branch="release/agentbox-v$VERSION"
+          [[ "$APP_SLUG" =~ ^[A-Za-z0-9_-]+$ ]]
+          expected_author="$APP_SLUG[bot]"
+          expected_email="$APP_SLUG[bot]@users.noreply.github.com"
+          expected_message="agentbox $VERSION"
+          git config user.name "$expected_author"
+          git config user.email "$expected_email"
+          git switch -c "$branch"
+          git add -- Formula/agentbox.rb
+          git commit -m "$expected_message"
+          repo="$GITHUB_REPOSITORY_OWNER/homebrew-tap"
+          existing=$(gh pr list --repo "$repo" --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+            --json author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,number)
+          count=$(jq 'length' <<<"$existing")
+          ((count <= 1)) || { echo "multiple open tap PRs use $branch" >&2; exit 1; }
+          if ((count == 1)); then
+            jq -e --arg author "$expected_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
+              .[0].author.login == $author and .[0].baseRefName == "main" and
+              .[0].headRefName == $branch and .[0].headRepositoryOwner.login == $owner and
+              .[0].isCrossRepository == false
+            ' <<<"$existing" >/dev/null || {
+              echo "refusing to update a tap PR not owned by the configured App" >&2
+              exit 1
+            }
+            pr=$(jq -r '.[0].number' <<<"$existing")
+            remote_oid=$(jq -r '.[0].headRefOid' <<<"$existing")
+            [[ "$remote_oid" =~ ^[0-9a-f]{40}$ ]]
+            git push --force-with-lease="refs/heads/$branch:$remote_oid" origin "HEAD:refs/heads/$branch"
+          else
+            remote_oid=$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')
+            if [[ -n "$remote_oid" ]]; then
+              [[ "$remote_oid" =~ ^[0-9a-f]{40}$ ]]
+              remote_commit=$(gh api "repos/$repo/git/commits/$remote_oid")
+              local_tree=$(git rev-parse 'HEAD^{tree}')
+              local_parent=$(git rev-parse 'HEAD^')
+              jq -e --arg tree "$local_tree" --arg parent "$local_parent" \
+                --arg author "$expected_author" --arg email "$expected_email" --arg message "$expected_message" '
+                .tree.sha == $tree and (.parents | length) == 1 and .parents[0].sha == $parent and
+                .author.name == $author and .author.email == $email and
+                .committer.name == $author and .committer.email == $email and .message == $message
+              ' <<<"$remote_commit" >/dev/null || {
+                echo "refusing to adopt an orphaned tap branch without exact tree, parent, and App identity evidence" >&2
+                exit 1
+              }
+              git push --force-with-lease="refs/heads/$branch:$remote_oid" origin "HEAD:refs/heads/$branch"
+            else
+              git push origin "HEAD:refs/heads/$branch"
+            fi
+            gh pr create --repo "$repo" \
+              --base main --head "$branch" --title "agentbox $VERSION" \
+              --body "Updates Agentbox to the immutable v$VERSION archive (sha256: $ARCHIVE_SHA)." >/dev/null
+            pr=$(gh pr view "$branch" --repo "$repo" --json number --jq .number)
+          fi
+          gh pr edit "$pr" --repo "$repo" --title "agentbox $VERSION" \
+            --body "Updates Agentbox to the immutable v$VERSION archive (sha256: $ARCHIVE_SHA)."
+          [[ "$pr" =~ ^[0-9]+$ ]]
+          echo 'present=true' >>"$GITHUB_OUTPUT"
+          echo "number=$pr" >>"$GITHUB_OUTPUT"
+      - name: Gate tap auto-merge on its aggregate CI
+        if: steps.tap-pr.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          TAP_PR: ${{ steps.tap-pr.outputs.number }}
+        run: |
+          repo="$GITHUB_REPOSITORY_OWNER/homebrew-tap"
+          required='Tap CI / required'
+          rules=$(gh api "repos/$repo/rules/branches/main" 2>/dev/null || printf '[]')
+          protection=$(gh api "repos/$repo/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
+          contexts=$(
+            {
+              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
+              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
+            } | LC_ALL=C sort -u
+          )
+          if ! grep -Fx "$required" <<<"$contexts" >/dev/null; then
+            echo "Refusing tap auto-merge: main does not require '$required'. The PR remains open." >&2
+            exit 1
+          fi
+          gh pr merge "$TAP_PR" --repo "$repo" --auto --squash --delete-branch

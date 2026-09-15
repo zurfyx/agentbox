@@ -1,0 +1,147 @@
+name: Vendor update
+
+on:
+  schedule:
+    - cron: "23 10 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Resolve and propose exact vendor inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve, download, and verify vendor artifacts
+        run: scripts/update-versions.sh --write --verify-downloads
+      - name: Validate bot diff allowlist
+        id: changes
+        run: |
+          mapfile -t changed < <(git diff --name-only)
+          if ((${#changed[@]} == 0)); then
+            echo 'present=false' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          expected=$'VERSION\npackage-lock.json\npackage.json\nrelease-inputs.json'
+          actual=$(printf '%s\n' "${changed[@]}" | LC_ALL=C sort)
+          if ((${#changed[@]} != 4)) || [[ "$actual" != "$expected" ]]; then
+            printf 'update bot produced a disallowed diff:\n%s\n' "${changed[*]}" >&2
+            exit 1
+          fi
+          echo 'present=true' >>"$GITHUB_OUTPUT"
+          echo "version=$(jq -er .agentbox_version release-inputs.json)" >>"$GITHUB_OUTPUT"
+      - name: Mint scoped Agentbox App token
+        if: steps.changes.outputs.present == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AGENTBOX_APP_ID }}
+          private-key: ${{ secrets.AGENTBOX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Commit and push the allowlisted proposal
+        if: steps.changes.outputs.present == 'true'
+        id: proposal
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          VERSION: ${{ steps.changes.outputs.version }}
+        run: |
+          branch="automation/vendor-update-v$VERSION"
+          [[ "$APP_SLUG" =~ ^[A-Za-z0-9_-]+$ ]]
+          expected_author="$APP_SLUG[bot]"
+          expected_email="$APP_SLUG[bot]@users.noreply.github.com"
+          expected_message="Update pinned vendor versions for v$VERSION"
+          git config user.name "$expected_author"
+          git config user.email "$expected_email"
+          git switch -c "$branch"
+          git add -- VERSION package.json package-lock.json release-inputs.json
+          staged=$(git diff --cached --name-only | LC_ALL=C sort)
+          test "$staged" = $'VERSION\npackage-lock.json\npackage.json\nrelease-inputs.json'
+          git commit -m "$expected_message"
+          authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          existing=$(gh pr list --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+            --json author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,number)
+          count=$(jq 'length' <<<"$existing")
+          ((count <= 1)) || { echo "multiple open update PRs use $branch" >&2; exit 1; }
+          if ((count == 1)); then
+            jq -e --arg author "$expected_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
+              .[0].author.login == $author and .[0].baseRefName == "main" and
+              .[0].headRefName == $branch and .[0].headRepositoryOwner.login == $owner and
+              .[0].isCrossRepository == false
+            ' <<<"$existing" >/dev/null || {
+              echo "refusing to update a PR not owned by the configured App" >&2
+              exit 1
+            }
+            pr=$(jq -r '.[0].number' <<<"$existing")
+            remote_oid=$(jq -r '.[0].headRefOid' <<<"$existing")
+            [[ "$remote_oid" =~ ^[0-9a-f]{40}$ ]]
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+              push --force-with-lease="refs/heads/$branch:$remote_oid" origin "HEAD:refs/heads/$branch"
+          else
+            remote_oid=$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')
+            if [[ -n "$remote_oid" ]]; then
+              [[ "$remote_oid" =~ ^[0-9a-f]{40}$ ]]
+              remote_commit=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$remote_oid")
+              local_tree=$(git rev-parse 'HEAD^{tree}')
+              local_parent=$(git rev-parse 'HEAD^')
+              jq -e --arg tree "$local_tree" --arg parent "$local_parent" \
+                --arg author "$expected_author" --arg email "$expected_email" --arg message "$expected_message" '
+                .tree.sha == $tree and (.parents | length) == 1 and .parents[0].sha == $parent and
+                .author.name == $author and .author.email == $email and
+                .committer.name == $author and .committer.email == $email and .message == $message
+              ' <<<"$remote_commit" >/dev/null || {
+                echo "refusing to adopt an orphaned branch without exact tree, parent, and App identity evidence" >&2
+                exit 1
+              }
+              git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+                push --force-with-lease="refs/heads/$branch:$remote_oid" origin "HEAD:refs/heads/$branch"
+            else
+              git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+                push origin "HEAD:refs/heads/$branch"
+            fi
+            gh pr create \
+              --base main --head "$branch" \
+              --title "Update pinned vendor versions for v$VERSION" \
+              --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly VERSION, release-inputs.json, package.json, and package-lock.json." >/dev/null
+            pr=$(gh pr view "$branch" --json number --jq .number)
+          fi
+          gh pr edit "$pr" \
+            --title "Update pinned vendor versions for v$VERSION" \
+            --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly VERSION, release-inputs.json, package.json, and package-lock.json."
+          [[ "$pr" =~ ^[0-9]+$ ]]
+          echo "number=$pr" >>"$GITHUB_OUTPUT"
+      - name: Enable auto-merge only behind aggregate CI
+        if: steps.changes.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.proposal.outputs.number }}
+        run: |
+          required='CI / required'
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" 2>/dev/null || printf '[]')
+          protection=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
+          contexts=$(
+            {
+              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
+              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
+            } | LC_ALL=C sort -u
+          )
+          if ! grep -Fx "$required" <<<"$contexts" >/dev/null; then
+            echo "Refusing auto-merge: main does not require '$required'. The PR remains open." >&2
+            exit 1
+          fi
+          gh pr merge "$PR" --auto --squash --delete-branch
