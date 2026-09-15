@@ -384,7 +384,7 @@ jobs:
           git add -- Formula/agentbox.rb
           git commit -m "$expected_message"
           repo="$GITHUB_REPOSITORY_OWNER/homebrew-tap"
-          existing=$(gh pr list --repo "$repo" --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+          existing=$(gh pr list --repo "$repo" --head "$branch" --state open \
             --json author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,number)
           count=$(jq 'length' <<<"$existing")
           ((count <= 1)) || { echo "multiple open tap PRs use $branch" >&2; exit 1; }
