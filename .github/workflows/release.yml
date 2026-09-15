@@ -68,16 +68,8 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$SOURCE_COMMIT"
           gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SOURCE_COMMIT/check-runs?per_page=100" |
             jq -e '[.check_runs[] | select(.name == "required" and .conclusion == "success")] | length > 0' >/dev/null
-          rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" 2>/dev/null || printf '[]')
-          protection=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
-          contexts=$(
-            {
-              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
-              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
-            } | LC_ALL=C sort -u
-          )
-          grep -Fx 'required' <<<"$contexts" >/dev/null || {
-            echo "main is not protected by the aggregate 'required' check" >&2
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true || {
+            echo "main is not protected" >&2
             exit 1
           }
       - name: Set up QEMU
@@ -406,17 +398,8 @@ jobs:
           TAP_PR: ${{ steps.tap-pr.outputs.number }}
         run: |
           repo="$GITHUB_REPOSITORY_OWNER/homebrew-tap"
-          required='required'
-          rules=$(gh api "repos/$repo/rules/branches/main" 2>/dev/null || printf '[]')
-          protection=$(gh api "repos/$repo/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
-          contexts=$(
-            {
-              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
-              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
-            } | LC_ALL=C sort -u
-          )
-          if ! grep -Fx "$required" <<<"$contexts" >/dev/null; then
-            echo "Refusing tap auto-merge: main does not require '$required'. The PR remains open." >&2
+          if [[ "$(gh api "repos/$repo/branches/main" --jq .protected)" != true ]]; then
+            echo "Refusing tap auto-merge: main is not protected. The PR remains open." >&2
             exit 1
           fi
           gh pr merge "$TAP_PR" --repo "$repo" --auto --squash --delete-branch
