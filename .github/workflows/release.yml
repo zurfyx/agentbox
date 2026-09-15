@@ -154,13 +154,11 @@ jobs:
           echo "amd64=$amd64" >>"$GITHUB_OUTPUT"
           echo "arm64=$arm64" >>"$GITHUB_OUTPUT"
       - name: Smoke the exact runtime entrypoint on both platforms
-        env:
-          INDEX_DIGEST: ${{ steps.identities.outputs.index }}
         run: |
-          for platform in linux/amd64 linux/arm64; do
-            docker run --rm --platform "$platform" \
-              "$IMAGE@$INDEX_DIGEST" --help | grep -F 'prepare'
-          done
+          docker run --rm --platform linux/amd64 \
+            "$IMAGE@${{ steps.identities.outputs.amd64 }}" --help | grep -F 'prepare'
+          docker run --rm --platform linux/arm64 \
+            "$IMAGE@${{ steps.identities.outputs.arm64 }}" --help | grep -F 'prepare'
       - name: Verify anonymous exact-digest consumption
         run: |
           install -d -m 0700 /tmp/anonymous-docker-config
