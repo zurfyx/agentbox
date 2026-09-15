@@ -8,9 +8,8 @@ class Agentbox < Formula
   license "MIT"
 
   depends_on "jq"
-  depends_on "python@3.14"
-
   depends_on :macos
+  depends_on "python@3.14"
 
   def install
     bin.install "bin/agentbox"

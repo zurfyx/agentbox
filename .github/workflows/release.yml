@@ -67,7 +67,7 @@ jobs:
           test "$default_branch" = main
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$SOURCE_COMMIT"
           gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SOURCE_COMMIT/check-runs?per_page=100" |
-            jq -e '[.check_runs[] | select(.name == "CI / required" and .conclusion == "success")] | length > 0' >/dev/null
+            jq -e '[.check_runs[] | select(.name == "required" and .conclusion == "success")] | length > 0' >/dev/null
           rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" 2>/dev/null || printf '[]')
           protection=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
           contexts=$(
@@ -76,8 +76,8 @@ jobs:
               jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
             } | LC_ALL=C sort -u
           )
-          grep -Fx 'CI / required' <<<"$contexts" >/dev/null || {
-            echo "main is not protected by the aggregate 'CI / required' check" >&2
+          grep -Fx 'required' <<<"$contexts" >/dev/null || {
+            echo "main is not protected by the aggregate 'required' check" >&2
             exit 1
           }
       - name: Set up QEMU
@@ -406,7 +406,7 @@ jobs:
           TAP_PR: ${{ steps.tap-pr.outputs.number }}
         run: |
           repo="$GITHUB_REPOSITORY_OWNER/homebrew-tap"
-          required='Tap CI / required'
+          required='required'
           rules=$(gh api "repos/$repo/rules/branches/main" 2>/dev/null || printf '[]')
           protection=$(gh api "repos/$repo/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
           contexts=$(
