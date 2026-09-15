@@ -148,8 +148,12 @@ jobs:
               exit 1
             }
             version_id=$(jq -er '.id | select(type == "number")' <<<"$candidate")
+            jq -e --arg tag "v$VERSION" '[.[][] | .metadata.container.tags[]? | select(. != $tag)] | length == 0' <<<"$versions" >/dev/null || {
+              echo "refusing to replace a package that carries another tag" >&2
+              exit 1
+            }
             echo "Replacing $visibility unpublished v$VERSION package version $version_id" >&2
-            gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions/$version_id"
+            gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime"
             echo 'present=false' >>"$GITHUB_OUTPUT"
             exit 0
           fi
