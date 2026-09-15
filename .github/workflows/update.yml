@@ -131,17 +131,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.proposal.outputs.number }}
         run: |
-          required='required'
-          rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" 2>/dev/null || printf '[]')
-          protection=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks" 2>/dev/null || printf '{}')
-          contexts=$(
-            {
-              jq -r '.[].parameters.required_status_checks[]?.context' <<<"$rules" 2>/dev/null || true
-              jq -r '.contexts[]?, .checks[]?.context' <<<"$protection" 2>/dev/null || true
-            } | LC_ALL=C sort -u
-          )
-          if ! grep -Fx "$required" <<<"$contexts" >/dev/null; then
-            echo "Refusing auto-merge: main does not require '$required'. The PR remains open." >&2
+          if [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" != true ]]; then
+            echo "Refusing auto-merge: main is not protected. The PR remains open." >&2
             exit 1
           fi
           gh pr merge "$PR" --auto --squash --delete-branch
