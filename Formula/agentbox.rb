@@ -7,10 +7,9 @@ class Agentbox < Formula
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
 
+  depends_on :macos
   depends_on "jq"
   depends_on "python@3.14"
-
-  depends_on :macos
 
   def install
     bin.install "bin/agentbox"
