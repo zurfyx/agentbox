@@ -350,6 +350,7 @@ jobs:
         run: |
           ARCHIVE_SHA=$(awk '{print $1}' "../dist/agentbox-$VERSION.tar.gz.sha256")
           export ARCHIVE_SHA
+          cp ../Formula/agentbox.rb Formula/agentbox.rb
           python3 - <<'PY'
           import os
           import pathlib
