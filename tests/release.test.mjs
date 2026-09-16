@@ -748,6 +748,8 @@ test("automatic release workflows encode trusted wakeups and immutable publicati
   const finalTagCheck = publishJob.indexOf("# The tag may have appeared after upload");
   const publishRelease = publishJob.indexOf('gh release edit "v$VERSION" --draft=false');
   assert.ok(upload >= 0 && upload < finalTagCheck && finalTagCheck < publishRelease);
+  assert.match(publishJob, /gh release upload "v\$VERSION" "dist\/\$asset" --repo "\$GITHUB_REPOSITORY"/);
+  assert.match(publishJob, /gh release edit "v\$VERSION" --draft=false --repo "\$GITHUB_REPOSITORY"/);
   assert.match(publishJob, /Download exact published assets for tap-only repair/);
   assert.match(publishJob, /actual_digest="sha256:\$\(sha256sum "dist\/\$asset"/);
   assert.match(publishJob, /cp \.\.\/dist\/source-agentbox\.rb Formula\/agentbox\.rb/);
