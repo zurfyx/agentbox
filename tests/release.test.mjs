@@ -825,7 +825,10 @@ test("automatic release workflows encode trusted wakeups and immutable publicati
   assert.match(statusJob, /if \[\[ "\$PUBLISH_RESULT" == success && "\$POST_PLAN_RESULT" == success && "\$FINAL_BACKLOG_COUNT" =~ \^\[0-9\]\+\$ \]\]; then/);
   assert.match(statusJob, /if \(\(FINAL_BACKLOG_COUNT > 0\)\); then/);
   assert.doesNotMatch(statusJob, /remaining=|remaining - 1|INITIAL_BACKLOG_COUNT[^\n]*workflow run/);
+  assert.match(statusJob, /for attempt in 1 2 3 4 5; do/);
   assert.match(statusJob, /gh workflow run release\.yml --repo "\$GITHUB_REPOSITORY" --ref main/);
+  assert.match(statusJob, /sleep \$\(\(2 \*\* attempt\)\)/);
+  assert.match(statusJob, /test "\$dispatch_succeeded" = true/);
   assert.match(release, /IMMUTABLE_RELEASES_ENABLED: \$\{\{ vars\.IMMUTABLE_RELEASES_ENABLED \}\}/);
   assert.match(release, /test "\$IMMUTABLE_RELEASES_ENABLED" = true/);
   assert.doesNotMatch(release, /gh api[^\n]*immutable-releases/);

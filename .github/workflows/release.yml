@@ -1559,7 +1559,17 @@ jobs:
 
           if [[ "$PUBLISH_RESULT" == success && "$POST_PLAN_RESULT" == success && "$FINAL_BACKLOG_COUNT" =~ ^[0-9]+$ ]]; then
             if ((FINAL_BACKLOG_COUNT > 0)); then
-              gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main
+              dispatch_succeeded=false
+              for attempt in 1 2 3 4 5; do
+                if gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main; then
+                  dispatch_succeeded=true
+                  break
+                fi
+                if ((attempt < 5)); then
+                  sleep $((2 ** attempt))
+                fi
+              done
+              test "$dispatch_succeeded" = true
               printf '\nQueued continuation for %d live eligible commit(s).\n' "$FINAL_BACKLOG_COUNT" >>"$GITHUB_STEP_SUMMARY"
             fi
           fi
