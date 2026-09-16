@@ -1092,7 +1092,7 @@ jobs:
                 exit 1
               }
             else
-              gh release upload "v$VERSION" "dist/$asset"
+              gh release upload "v$VERSION" "dist/$asset" --repo "$GITHUB_REPOSITORY"
             fi
           done
           release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
@@ -1104,7 +1104,7 @@ jobs:
             verify_tag || { echo "draft tag changed before publication" >&2; exit 1; }
           fi
           verify_cursor_and_draft
-          gh release edit "v$VERSION" --draft=false
+          gh release edit "v$VERSION" --draft=false --repo "$GITHUB_REPOSITORY"
           verify_tag || { echo "published release tag does not identify the requested source commit" >&2; exit 1; }
           release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
           jq -e '.draft == false and .prerelease == false' <<<"$release" >/dev/null
