@@ -699,8 +699,8 @@ test("automatic release workflows encode trusted wakeups and immutable publicati
   const publishImage = releaseJob("publish_image", "verify_image");
   assert.match(publishImage, /packages: write/);
   assert.match(publishImage, /Download inert OCI archive/);
-  assert.match(publishImage, /Mint scoped draft read token/);
-  assert.match(publishImage, /permission-contents: read/);
+  assert.match(publishImage, /Mint scoped draft visibility token/);
+  assert.match(publishImage, /GitHub hides draft releases from contents-read installation tokens\.[\s\S]{0,80}permission-contents: write/);
   assert.match(publishImage, /RELEASE_TOKEN: \$\{\{ steps\.draft-read-token\.outputs\.token \}\}/);
   assert.match(publishImage, /GH_TOKEN="\$RELEASE_TOKEN" gh api[^\n]*releases/);
   assert.match(publishImage, /Verify exact draft reservation before image mutation/);
