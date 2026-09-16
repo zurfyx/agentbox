@@ -58,6 +58,7 @@ readonly IMAGE_TAG="agentbox-dev:$SOURCE_COMMIT"
 agentbox_version=$(< "$VERSION_FILE")
 [[ $agentbox_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION is invalid"
 cmp -s "$VERSION_FILE" <(printf '%s\n' "$agentbox_version") || die "VERSION must be one canonical line"
+[[ $agentbox_version == 0.0.0 ]] || die "development source VERSION must be the 0.0.0 sentinel"
 [[ "$(jq -er .agentbox_version "$INPUT")" == "$agentbox_version" ]] ||
   die "VERSION and release-inputs.json disagree"
 

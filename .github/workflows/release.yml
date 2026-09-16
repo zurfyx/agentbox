@@ -1,18 +1,20 @@
 name: Release
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
-      version:
-        description: Exact Agentbox version (X.Y.Z)
-        required: true
-        type: string
-      source_commit:
-        description: Exact protected-main commit (40 lowercase hex)
-        required: true
+      recovery_source_commit:
+        description: Optional oldest eligible protected-main SHA; an incomplete tap is repaired first
+        required: false
         type: string
       replace_unpublished_image:
-        description: Replace a vX.Y.Z image left by a failed unpublished release
+        description: With recovery SHA, replace only its proven unpublished orphan image
         required: false
         default: false
         type: boolean
@@ -23,150 +25,533 @@ permissions:
 concurrency:
   group: release
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  image:
-    name: Build or verify immutable runtime
-    if: github.ref == 'refs/heads/main'
+  plan:
+    name: Reconcile protected-main release state
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      action: ${{ steps.release-plan.outputs.action }}
+      version: ${{ steps.release-plan.outputs.version }}
+      source_commit: ${{ steps.release-plan.outputs.source_commit }}
+      reason: ${{ steps.release-plan.outputs.reason }}
+      legacy_tap_only: ${{ steps.release-plan.outputs.legacy_tap_only }}
+      tap_repair_only: ${{ steps.release-plan.outputs.tap_repair_only }}
+      backlog_count: ${{ steps.release-plan.outputs.backlog_count }}
+      oldest_pending_commit: ${{ steps.release-plan.outputs.oldest_pending_commit }}
+      oldest_pending_status: ${{ steps.release-plan.outputs.oldest_pending_status }}
+      tooling_commit: ${{ steps.release-plan.outputs.tooling_commit }}
+      cursor_digest: ${{ steps.release-plan.outputs.cursor_digest }}
+    steps:
+      - name: Check out the trusted release engine from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Collect durable release, first-parent, and exact CI state
+        id: release-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_SHA: ${{ inputs.recovery_source_commit }}
+          ALLOW_ORPHAN_RECOVERY: ${{ inputs.replace_unpublished_image }}
+          WAKEUP_RUN_ID: ${{ github.event.workflow_run.id }}
+          WAKEUP_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          test "$default_branch" = main
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            [[ "$WAKEUP_RUN_ID" =~ ^[0-9]+$ ]]
+            [[ "$WAKEUP_SHA" =~ ^[0-9a-f]{40}$ ]]
+            wakeup=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WAKEUP_RUN_ID")
+            jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$WAKEUP_SHA" '
+              .name == "CI" and .path == ".github/workflows/ci.yml" and
+              .event == "push" and .head_branch == "main" and
+              .head_repository.full_name == $repo and .head_sha == $sha and
+              .status == "completed" and .conclusion == "success"
+            ' <<<"$wakeup" >/dev/null
+          fi
+
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > /tmp/releases.json
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+            > /tmp/ci-run-pages.json
+          jq '[.[] | .workflow_runs[]]' /tmp/ci-run-pages.json > /tmp/ci-runs.json
+
+          : > /tmp/tag-bindings.ndjson
+          while read -r tag; do
+            tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            tag_type=$(jq -er .object.type <<<"$tag_object")
+            tag_source=$(jq -er .object.sha <<<"$tag_object")
+            if [[ "$tag_type" == tag ]]; then
+              tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_source")
+              tag_type=$(jq -er .object.type <<<"$tag_object")
+              tag_source=$(jq -er .object.sha <<<"$tag_object")
+            fi
+            [[ "$tag_type" == commit && "$tag_source" =~ ^[0-9a-f]{40}$ ]]
+            recorded_source=$(jq -er --arg tag "$tag" '
+              [.[][] | select(.draft == false and .prerelease == false and .tag_name == $tag)] |
+              if length == 1 then .[0].target_commitish else error("published tag is ambiguous") end
+            ' /tmp/releases.json)
+            if [[ "$recorded_source" =~ ^[0-9a-f]{40}$ ]]; then
+              test "$recorded_source" = "$tag_source"
+            fi
+            jq -cn --arg tag "$tag" --arg source "$tag_source" \
+              '{key: $tag, value: $source}' >> /tmp/tag-bindings.ndjson
+          done < <(jq -r '
+            .[][] | select(.draft == false and .prerelease == false) | .tag_name |
+            select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+          ' /tmp/releases.json)
+          jq -s 'from_entries' /tmp/tag-bindings.ndjson > /tmp/tag-bindings.json
+          jq --slurpfile bindings /tmp/tag-bindings.json '
+            map(map(
+              if .draft == false and .prerelease == false and
+                 (.tag_name | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              then . + {source_commit: $bindings[0][.tag_name]}
+              else .
+              end
+            ))
+          ' /tmp/releases.json > /tmp/releases-with-tag-sources.json
+
+          : > /tmp/main-commits.ndjson
+          while read -r commit; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+            source_sentinel=false
+            dockerfile_sentinel=false
+            formula_sentinel=false
+            if [[ "$(git show "$commit:VERSION" 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:release-inputs.json" 2>/dev/null | jq -er .agentbox_version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package.json" 2>/dev/null | jq -er .version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package-lock.json" 2>/dev/null | jq -er .version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package-lock.json" 2>/dev/null | jq -er '.packages[""].version' 2>/dev/null || true)" == 0.0.0 ]]; then
+              source_sentinel=true
+            fi
+            dockerfile=$(git show "$commit:Dockerfile" 2>/dev/null || true)
+            if [[ "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' <<<"$dockerfile")" == 1 ]] &&
+               [[ "$(grep -Ec '^ARG AGENTBOX_VERSION=' <<<"$dockerfile")" == 1 ]]; then
+              dockerfile_sentinel=true
+            fi
+            formula=$(git show "$commit:Formula/agentbox.rb" 2>/dev/null || true)
+            if [[ "$(grep -Fxc '  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  version "0.0.0"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  sha256 "0000000000000000000000000000000000000000000000000000000000000000"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  url .*agentbox/releases/download/' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  version ' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  sha256 ' <<<"$formula")" == 1 ]]; then
+              formula_sentinel=true
+            fi
+            jq -cn --arg sha "$commit" \
+              --argjson source "$source_sentinel" \
+              --argjson dockerfile "$dockerfile_sentinel" \
+              --argjson formula "$formula_sentinel" \
+              '{sha: $sha, source_sentinel: $source, dockerfile_sentinel: $dockerfile, formula_sentinel: $formula}' \
+              >> /tmp/main-commits.ndjson
+          done < <(git rev-list --first-parent --reverse origin/main)
+          jq -s . /tmp/main-commits.ndjson > /tmp/main-commits.json
+
+          tooling_commit=
+          while read -r commit; do
+            if jq -e --arg sha "$commit" '
+              [.[] | select(.head_sha == $sha and .name == "CI" and
+                             .path == ".github/workflows/ci.yml" and .event == "push" and
+                             .head_branch == "main" and .status == "completed" and
+                             .conclusion == "success")] | length >= 1
+            ' /tmp/ci-runs.json >/dev/null; then
+              tooling_commit=$commit
+              break
+            fi
+          done < <(git rev-list --first-parent origin/main)
+          [[ "$tooling_commit" =~ ^[0-9a-f]{40}$ ]]
+
+          cursor_digest=$(jq -cS -n \
+            --slurpfile releases /tmp/releases-with-tag-sources.json \
+            --slurpfile commits /tmp/main-commits.json \
+            --slurpfile runs /tmp/ci-runs.json '
+              {
+                releases: [$releases[0][][] | {
+                  id, tag_name, target_commitish, source_commit, draft, prerelease, immutable,
+                  assets: [.assets[] | {id, name, digest}] | sort_by(.name)
+                }] | sort_by(.tag_name, .id),
+                commits: $commits[0],
+                successful_ci: [$runs[0][] |
+                  select(.name == "CI" and .path == ".github/workflows/ci.yml" and
+                         .event == "push" and .head_branch == "main" and
+                         .status == "completed" and .conclusion == "success") |
+                  {id, head_sha}] | sort_by(.id)
+              }
+            ' | sha256sum | awk '{print $1}')
+          [[ "$cursor_digest" =~ ^[0-9a-f]{64}$ ]]
+
+          base_args=(
+            --releases /tmp/releases-with-tag-sources.json
+            --commits /tmp/main-commits.json
+            --ci-runs /tmp/ci-runs.json
+          )
+
+          # A published release is not complete until tap main names its exact
+          # archive. Repair that state before allocating a newer patch.
+          latest=$(jq -c '
+            [.[][] |
+             select(.draft == false and .prerelease == false) |
+             select(.tag_name | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) |
+             . + {numeric_version: (.tag_name[1:] | split(".") | map(tonumber))}] |
+            sort_by(.numeric_version) | last
+          ' /tmp/releases-with-tag-sources.json)
+          latest_tag=$(jq -er .tag_name <<<"$latest")
+          latest_version=${latest_tag#v}
+          latest_source=$(jq -er .source_commit <<<"$latest")
+          [[ "$latest_source" =~ ^[0-9a-f]{40}$ ]]
+          expected_assets=$(printf 'agentbox-%s.provenance.json\nagentbox-%s.tar.gz\nagentbox-%s.tar.gz.sha256' \
+            "$latest_version" "$latest_version" "$latest_version")
+          actual_assets=$(jq -r '.assets[].name' <<<"$latest" | LC_ALL=C sort)
+          test "$actual_assets" = "$expected_assets"
+          mkdir -p /tmp/cursor-release
+          for asset in \
+            "agentbox-$latest_version.tar.gz" \
+            "agentbox-$latest_version.tar.gz.sha256" \
+            "agentbox-$latest_version.provenance.json"; do
+            asset_record=$(jq -ec --arg asset "$asset" '
+              [.assets[] | select(.name == $asset)] |
+              if length == 1 then .[0] else error("latest release asset is ambiguous") end
+            ' <<<"$latest")
+            asset_id=$(jq -er .id <<<"$asset_record")
+            api_digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$asset_record")
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"/tmp/cursor-release/$asset"
+            actual_digest="sha256:$(sha256sum "/tmp/cursor-release/$asset" | awk '{print $1}')"
+            test "$actual_digest" = "$api_digest"
+          done
+          archive_digest=$(jq -er --arg asset "agentbox-$latest_version.tar.gz" '
+            [.assets[] | select(.name == $asset)] |
+            if length == 1 then .[0].digest else error("latest release archive is ambiguous") end
+          ' <<<"$latest")
+          [[ "$archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          archive_sha=${archive_digest#sha256:}
+          grep -Fx "$archive_sha  agentbox-$latest_version.tar.gz" \
+            "/tmp/cursor-release/agentbox-$latest_version.tar.gz.sha256" >/dev/null
+          jq -e --arg version "$latest_version" --arg source "$latest_source" \
+            --arg archive "agentbox-$latest_version.tar.gz" --arg archive_sha "$archive_sha" '
+            .schema_version == 1 and .agentbox_version == $version and
+            .source_commit == $source and .archive == $archive and
+            .archive_sha256 == $archive_sha and
+            (.runtime_index_digest | test("^sha256:[0-9a-f]{64}$")) and
+            .runtime_image == ("ghcr.io/zurfyx/agentbox-runtime@" + .runtime_index_digest) and
+            (.runtime_platform_digests["linux/amd64"] | test("^sha256:[0-9a-f]{64}$")) and
+            (.runtime_platform_digests["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
+          ' "/tmp/cursor-release/agentbox-$latest_version.provenance.json" >/dev/null
+          tap_matches=false
+          if tap_formula=$(gh api \
+            "repos/$GITHUB_REPOSITORY_OWNER/homebrew-tap/contents/Formula/agentbox.rb?ref=main" \
+            --jq .content 2>/dev/null | base64 --decode); then
+            if grep -Fx "  version \"$latest_version\"" <<<"$tap_formula" >/dev/null &&
+               grep -Fx "  sha256 \"$archive_sha\"" <<<"$tap_formula" >/dev/null &&
+               grep -Fx "  url \"https://github.com/$GITHUB_REPOSITORY/releases/download/$latest_tag/agentbox-$latest_version.tar.gz\"" \
+                 <<<"$tap_formula" >/dev/null; then
+              tap_matches=true
+            fi
+          fi
+
+          if [[ "$tap_matches" != true ]]; then
+            if [[ -n "$RECOVERY_SHA" || "$ALLOW_ORPHAN_RECOVERY" == true ]]; then
+              echo "Requested recovery controls are deferred until the latest published release is repaired in the tap; rerun without recovery inputs first." >&2
+              exit 1
+            fi
+            plan=$(python3 scripts/plan-release.py "${base_args[@]}" --recovery-sha "$latest_source")
+          else
+            args=("${base_args[@]}")
+            if [[ -n "$RECOVERY_SHA" ]]; then
+              [[ "$RECOVERY_SHA" =~ ^[0-9a-f]{40}$ ]]
+              args+=(--recovery-sha "$RECOVERY_SHA")
+            fi
+            if [[ "$ALLOW_ORPHAN_RECOVERY" == true ]]; then
+              args+=(--allow-orphan-recovery)
+            fi
+            plan=$(python3 scripts/plan-release.py "${args[@]}")
+          fi
+          jq -e '
+            type == "object" and
+            ([keys[]] | sort) == ["action", "backlog_count", "oldest_pending_commit", "oldest_pending_status", "reason", "source_commit", "version"] and
+            (.action | IN("publish", "resume", "noop")) and
+            (.reason | type == "string") and
+            (.backlog_count | type == "number" and . >= 0 and floor == .) and
+            (.oldest_pending_status | IN("eligible", "awaiting_ci", "none")) and
+            (if .oldest_pending_status == "none" then .oldest_pending_commit == ""
+             else (.oldest_pending_commit | test("^[0-9a-f]{40}$")) end)
+          ' <<<"$plan" >/dev/null
+          action=$(jq -r .action <<<"$plan")
+          version=$(jq -r '.version // ""' <<<"$plan")
+          source_commit=$(jq -r '.source_commit // ""' <<<"$plan")
+          legacy_tap_only=false
+          tap_repair_only=false
+          if [[ "$action" != noop ]]; then
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$version" != 0.0.0 ]]
+            [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+          fi
+          if [[ "$action" == resume && "$version" == 0.1.0 &&
+                "$source_commit" == d2a9a8eebcbfa01f3684963998ee1554659c6443 ]]; then
+            legacy_tap_only=true
+          fi
+          if [[ "$action" == resume && "$version" == "$latest_version" &&
+                "$source_commit" == "$latest_source" ]]; then
+            tap_repair_only=true
+          fi
+          jq -cS . <<<"$plan"
+          {
+            echo "action=$action"
+            echo "version=$version"
+            echo "source_commit=$source_commit"
+            printf 'reason=%s\n' "$(jq -c .reason <<<"$plan")"
+            echo "legacy_tap_only=$legacy_tap_only"
+            echo "tap_repair_only=$tap_repair_only"
+            echo "backlog_count=$(jq -r .backlog_count <<<"$plan")"
+            echo "oldest_pending_commit=$(jq -r .oldest_pending_commit <<<"$plan")"
+            echo "oldest_pending_status=$(jq -r .oldest_pending_status <<<"$plan")"
+            echo "tooling_commit=$tooling_commit"
+            echo "cursor_digest=$cursor_digest"
+          } >>"$GITHUB_OUTPUT"
+      - name: Require immutable releases before any publication mutation
+        if: steps.release-plan.outputs.action != 'noop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          settings=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases")
+          jq -e '.enabled == true' <<<"$settings" >/dev/null || {
+            echo "Repository immutable releases must be enabled before publication." >&2
+            exit 1
+          }
+
+  legacy_preflight:
+    name: Verify pinned legacy release for tap-only repair
+    needs: plan
+    if: needs.plan.outputs.legacy_tap_only == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Prove exact legacy release, tag, and assets without mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEGACY_SOURCE: d2a9a8eebcbfa01f3684963998ee1554659c6443
+        run: |
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0")
+          jq -e --arg source "$LEGACY_SOURCE" '
+            .id == 389422097 and .tag_name == "v0.1.0" and
+            .target_commitish == $source and .draft == false and
+            .prerelease == false and .immutable == false and
+            ([.assets[] | {key: .name, value: .digest}] | from_entries) == {
+              "agentbox-0.1.0.provenance.json": "sha256:9f2f4c6238a5238cdd01aa650d8b1d899cfc41b725a8500433a113eb22c28536",
+              "agentbox-0.1.0.tar.gz": "sha256:e0d8159d80408f38cd0e57434786035b5b83dcb1e1b8a39c1620fa947c36c429",
+              "agentbox-0.1.0.tar.gz.sha256": "sha256:170bc4b8c145204c26b8c23e51416e2abac091198c7ad20c03150c6786f6e8ed"
+            }
+          ' <<<"$release" >/dev/null
+          tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.0")
+          tag_type=$(jq -er .object.type <<<"$tag_object")
+          tag_source=$(jq -er .object.sha <<<"$tag_object")
+          if [[ "$tag_type" == tag ]]; then
+            tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_source")
+            tag_type=$(jq -er .object.type <<<"$tag_object")
+            tag_source=$(jq -er .object.sha <<<"$tag_object")
+          fi
+          [[ "$tag_type" == commit && "$tag_source" == "$LEGACY_SOURCE" ]]
+
+  reserve:
+    name: Revalidate cursor and reserve exact draft
+    needs: plan
+    if: >-
+      needs.plan.outputs.action != 'noop' &&
+      needs.plan.outputs.tap_repair_only != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+      EXPECTED_CURSOR_DIGEST: ${{ needs.plan.outputs.cursor_digest }}
+    steps:
+      - name: Recompute the complete cursor immediately before reservation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > /tmp/releases.json
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+            > /tmp/ci-pages.json
+          jq '[.[] | .workflow_runs[]]' /tmp/ci-pages.json > /tmp/ci-runs.json
+          git init -q /tmp/repository
+          git -C /tmp/repository remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C /tmp/repository fetch -q --no-tags origin main
+
+          : > /tmp/tag-bindings.ndjson
+          while read -r tag; do
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            type=$(jq -er .object.type <<<"$object")
+            source=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$source")
+              type=$(jq -er .object.type <<<"$object")
+              source=$(jq -er .object.sha <<<"$object")
+            fi
+            [[ "$type" == commit && "$source" =~ ^[0-9a-f]{40}$ ]]
+            jq -cn --arg tag "$tag" --arg source "$source" '{key:$tag,value:$source}' >> /tmp/tag-bindings.ndjson
+          done < <(jq -r '.[][] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' /tmp/releases.json)
+          jq -s from_entries /tmp/tag-bindings.ndjson > /tmp/tag-bindings.json
+          jq --slurpfile bindings /tmp/tag-bindings.json '
+            map(map(if .draft == false and .prerelease == false and
+              (.tag_name | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              then . + {source_commit:$bindings[0][.tag_name]} else . end))
+          ' /tmp/releases.json > /tmp/releases-bound.json
+
+          : > /tmp/commits.ndjson
+          while read -r commit; do
+            source_sentinel=false; dockerfile_sentinel=false; formula_sentinel=false
+            if [[ "$(git -C /tmp/repository show "$commit:VERSION" 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git -C /tmp/repository show "$commit:release-inputs.json" 2>/dev/null | jq -er .agentbox_version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git -C /tmp/repository show "$commit:package.json" 2>/dev/null | jq -er .version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git -C /tmp/repository show "$commit:package-lock.json" 2>/dev/null | jq -er .version 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git -C /tmp/repository show "$commit:package-lock.json" 2>/dev/null | jq -er '.packages[""].version' 2>/dev/null || true)" == 0.0.0 ]]; then source_sentinel=true; fi
+            dockerfile=$(git -C /tmp/repository show "$commit:Dockerfile" 2>/dev/null || true)
+            if [[ "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' <<<"$dockerfile")" == 1 ]] &&
+               [[ "$(grep -Ec '^ARG AGENTBOX_VERSION=' <<<"$dockerfile")" == 1 ]]; then dockerfile_sentinel=true; fi
+            formula=$(git -C /tmp/repository show "$commit:Formula/agentbox.rb" 2>/dev/null || true)
+            if [[ "$(grep -Fxc '  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  version "0.0.0"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  sha256 "0000000000000000000000000000000000000000000000000000000000000000"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  url .*agentbox/releases/download/' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  version ' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  sha256 ' <<<"$formula")" == 1 ]]; then formula_sentinel=true; fi
+            jq -cn --arg sha "$commit" --argjson source "$source_sentinel" \
+              --argjson dockerfile "$dockerfile_sentinel" --argjson formula "$formula_sentinel" \
+              '{sha:$sha,source_sentinel:$source,dockerfile_sentinel:$dockerfile,formula_sentinel:$formula}' >> /tmp/commits.ndjson
+          done < <(git -C /tmp/repository rev-list --first-parent --reverse FETCH_HEAD)
+          jq -s . /tmp/commits.ndjson > /tmp/commits.json
+          actual_cursor_digest=$(jq -cS -n --slurpfile releases /tmp/releases-bound.json \
+            --slurpfile commits /tmp/commits.json --slurpfile runs /tmp/ci-runs.json '
+              {releases:[$releases[0][][]|{id,tag_name,target_commitish,source_commit,draft,prerelease,immutable,assets:[.assets[]|{id,name,digest}]|sort_by(.name)}]|sort_by(.tag_name,.id),commits:$commits[0],successful_ci:[$runs[0][]|select(.name=="CI" and .path==".github/workflows/ci.yml" and .event=="push" and .head_branch=="main" and .status=="completed" and .conclusion=="success")|{id,head_sha}]|sort_by(.id)}
+            ' | sha256sum | awk '{print $1}')
+          test "$actual_cursor_digest" = "$EXPECTED_CURSOR_DIGEST" || {
+            echo "release cursor changed after planning; retry reconciliation" >&2
+            exit 1
+          }
+          git -C /tmp/repository rev-list --first-parent FETCH_HEAD | grep -Fx "$SOURCE_COMMIT" >/dev/null
+      - name: Mint isolated release reservation token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AGENTBOX_APP_ID }}
+          private-key: ${{ secrets.AGENTBOX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          # Required when an older target differs in .github/workflows/** from main.
+          permission-workflows: write
+      - name: Create or adopt only the exact draft reservation
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: |
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          matches=$(jq -c --arg tag "v$VERSION" '[.[][]|select(.tag_name==$tag)]' <<<"$releases")
+          count=$(jq length <<<"$matches")
+          ((count <= 1))
+          if ((count == 0)); then
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+              echo "refusing to reserve v$VERSION because its tag exists without a release" >&2
+              exit 1
+            fi
+            gh release create "v$VERSION" --target "$SOURCE_COMMIT" --draft --title "Agentbox v$VERSION" --generate-notes
+            matches=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -c --arg tag "v$VERSION" '[.[][]|select(.tag_name==$tag)]')
+            test "$(jq length <<<"$matches")" = 1
+          fi
+          jq -e --arg source "$SOURCE_COMMIT" --arg title "Agentbox v$VERSION" --arg version "$VERSION" '
+            .[0].draft == true and .[0].prerelease == false and
+            .[0].target_commitish == $source and .[0].name == $title and
+            ([.[0].assets[].name] - [
+              "agentbox-"+$version+".tar.gz",
+              "agentbox-"+$version+".tar.gz.sha256",
+              "agentbox-"+$version+".provenance.json"
+            ] | length == 0) and
+            ([.[0].assets[].name] | unique | length) == ([.[0].assets[].name] | length)
+          ' <<<"$matches" >/dev/null
+
+  build_image:
+    name: Build runtime without registry credentials
+    needs: [plan, reserve]
+    if: needs.reserve.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
-      packages: write
     outputs:
-      index: ${{ steps.identities.outputs.index }}
-      amd64: ${{ steps.identities.outputs.amd64 }}
-      arm64: ${{ steps.identities.outputs.arm64 }}
+      instructions_sha: ${{ steps.prerequisites.outputs.instructions_sha }}
+      statusline_sha: ${{ steps.prerequisites.outputs.statusline_sha }}
+      oci_sha: ${{ steps.transfer.outputs.oci_sha }}
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/agentbox-runtime
-      VERSION: ${{ inputs.version }}
-      SOURCE_COMMIT: ${{ inputs.source_commit }}
-      REPLACE_UNPUBLISHED_IMAGE: ${{ inputs.replace_unpublished_image }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
     steps:
-      - name: Check out the exact requested commit
+      - name: Check out selected source without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_commit }}
+          ref: ${{ needs.plan.outputs.source_commit }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Prove protected-main source, inputs, CI, and uniqueness
+      - name: Enforce every source sentinel
         id: prerequisites
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$VERSION" != 0.0.0 && test "$VERSION" != 0.1.0
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-          test "$(< VERSION)" = "$VERSION"
-          test "$(jq -er .agentbox_version release-inputs.json)" = "$VERSION"
-          test "$(jq -er .version package.json)" = "$VERSION"
-          test "$(jq -er .version package-lock.json)" = "$VERSION"
-          test "$(jq -er '.packages[""].version' package-lock.json)" = "$VERSION"
-          test "$(jq -er .runtime.image_repository release-inputs.json)" = "$IMAGE"
+          test "$(< VERSION)" = 0.0.0
+          test "$(jq -er .agentbox_version release-inputs.json)" = 0.0.0
+          test "$(jq -er .version package.json)" = 0.0.0
+          test "$(jq -er .version package-lock.json)" = 0.0.0
+          test "$(jq -er '.packages[""].version' package-lock.json)" = 0.0.0
+          test "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' Dockerfile)" = 1
+          test "$(grep -Ec '^ARG AGENTBOX_VERSION=' Dockerfile)" = 1
+          test "$(grep -Fxc '  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"' Formula/agentbox.rb)" = 1
+          test "$(grep -Fxc '  version "0.0.0"' Formula/agentbox.rb)" = 1
+          test "$(grep -Fxc '  sha256 "0000000000000000000000000000000000000000000000000000000000000000"' Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  url .*agentbox/releases/download/' Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  version ' Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  sha256 ' Formula/agentbox.rb)" = 1
           instructions_sha=$(sha256sum runtime/instructions.md | awk '{print $1}')
           statusline_sha=$(sha256sum runtime/statusline.sh | awk '{print $1}')
           test "$(jq -er .managed_files.runtime_instructions.sha256 release-inputs.json)" = "$instructions_sha"
           test "$(jq -er .managed_files.statusline.sha256 release-inputs.json)" = "$statusline_sha"
           echo "instructions_sha=$instructions_sha" >>"$GITHUB_OUTPUT"
           echo "statusline_sha=$statusline_sha" >>"$GITHUB_OUTPUT"
-          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
-          test "$default_branch" = main
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$SOURCE_COMMIT"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SOURCE_COMMIT/check-runs?per_page=100" |
-            jq -e '[.check_runs[] | select(.name == "required" and .conclusion == "success")] | length > 0' >/dev/null
-          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true || {
-            echo "main is not protected" >&2
-            exit 1
-          }
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reuse only a matching existing runtime image
-        id: existing-image
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          owner_type=$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type)
-          if [[ "$owner_type" == Organization ]]; then package_scope=orgs; else package_scope=users; fi
-          set +e
-          versions=$(gh api --paginate --slurp "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions?per_page=100" 2>/tmp/package-error)
-          package_status=$?
-          set -e
-          if ((package_status != 0)); then
-            grep -F 'HTTP 404' /tmp/package-error >/dev/null || { cat /tmp/package-error >&2; exit "$package_status"; }
-            echo 'present=false' >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! jq -e --arg tag "v$VERSION" '[.[][] | .metadata.container.tags[]?] | index($tag) != null' <<<"$versions" >/dev/null; then
-            echo 'present=false' >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          descriptor=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest}}')
-          index=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor")
-          images=$(docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Image}}')
-          matches_source=true
-          replaceable_orphan=true
-          for platform in linux/amd64 linux/arm64; do
-            labels=$(jq -er --arg platform "$platform" '.[$platform].config.Labels' <<<"$images")
-            revision=$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")
-            [[ $revision == "$SOURCE_COMMIT" ]] || matches_source=false
-            [[ $revision =~ ^[0-9a-f]{40}$ ]] || replaceable_orphan=false
-            [[ "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" == "https://github.com/$GITHUB_REPOSITORY" ]] || replaceable_orphan=false
-            [[ "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" == "$VERSION" ]] || replaceable_orphan=false
-            [[ "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" == MIT ]] || replaceable_orphan=false
-            [[ "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" == 1 ]] || replaceable_orphan=false
-            [[ "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.instructions_sha }}' ]] || replaceable_orphan=false
-            [[ "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" == '${{ steps.prerequisites.outputs.statusline_sha }}' ]] || replaceable_orphan=false
-          done
-          [[ $replaceable_orphan == true ]] || matches_source=false
-          if [[ $matches_source != true ]]; then
-            [[ $REPLACE_UNPUBLISHED_IMAGE == true ]] || {
-              echo "v$VERSION exists but does not match the requested immutable source" >&2
-              exit 1
-            }
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1 ||
-               gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" >/dev/null 2>&1; then
-              echo "refusing to replace an image with an existing tag or release" >&2
-              exit 1
-            fi
-            [[ $replaceable_orphan == true ]] || {
-              echo "refusing to replace an image whose Agentbox metadata differs beyond revision" >&2
-              exit 1
-            }
-            visibility=$(gh api "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime" --jq .visibility)
-            [[ $visibility == private || $visibility == public ]] || { echo "unknown package visibility" >&2; exit 1; }
-            candidate=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.metadata.container.tags | index($tag))] | if length == 1 then .[0] else error("expected one tagged package version") end' <<<"$versions")
-            test "$(jq -c '.metadata.container.tags | sort' <<<"$candidate")" = "[\"v$VERSION\"]" || {
-              echo "refusing to replace a package version carrying additional tags" >&2
-              exit 1
-            }
-            version_id=$(jq -er '.id | select(type == "number")' <<<"$candidate")
-            jq -e --arg tag "v$VERSION" '[.[][] | .metadata.container.tags[]? | select(. != $tag)] | length == 0' <<<"$versions" >/dev/null || {
-              echo "refusing to replace a package that carries another tag" >&2
-              exit 1
-            }
-            echo "Replacing $visibility unpublished v$VERSION package version $version_id" >&2
-            gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime"
-            echo 'present=false' >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'present=true' >>"$GITHUB_OUTPUT"
-          echo "index=$index" >>"$GITHUB_OUTPUT"
-      - name: Build and publish the exact multi-architecture runtime
-        if: steps.existing-image.outputs.present != 'true'
-        id: image
+      - name: Build exact multi-architecture OCI archive
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: false
+          outputs: type=oci,dest=/tmp/agentbox-runtime.oci.tar
           tags: ${{ env.IMAGE }}:v${{ env.VERSION }}
           build-args: |
             AGENTBOX_VERSION=${{ env.VERSION }}
@@ -181,61 +566,389 @@ jobs:
             org.opencontainers.image.licenses=MIT
           provenance: mode=max
           sbom: true
+      - name: Record inert OCI transfer digest
+        id: transfer
+        run: echo "oci_sha=$(sha256sum /tmp/agentbox-runtime.oci.tar | awk '{print $1}')" >>"$GITHUB_OUTPUT"
+      - name: Transfer OCI archive to a fresh publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-oci-${{ github.run_id }}
+          path: /tmp/agentbox-runtime.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish_image:
+    name: Publish or reuse runtime in a fresh job
+    needs: [plan, reserve, build_image]
+    if: needs.build_image.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    outputs:
+      index: ${{ steps.identities.outputs.index }}
+      amd64: ${{ steps.identities.outputs.amd64 }}
+      arm64: ${{ steps.identities.outputs.arm64 }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/agentbox-runtime
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+      REPLACE_UNPUBLISHED_IMAGE: ${{ inputs.replace_unpublished_image }}
+      INSTRUCTIONS_SHA: ${{ needs.build_image.outputs.instructions_sha }}
+      STATUSLINE_SHA: ${{ needs.build_image.outputs.statusline_sha }}
+      EXPECTED_OCI_SHA: ${{ needs.build_image.outputs.oci_sha }}
+    steps:
+      - name: Download inert OCI archive
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: runtime-oci-${{ github.run_id }}
+          path: /tmp/runtime-artifact
+      - name: Verify exact draft reservation before image mutation
+        id: draft-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f /tmp/runtime-artifact/agentbox-runtime.oci.tar
+          test ! -L /tmp/runtime-artifact/agentbox-runtime.oci.tar
+          test "$(sha256sum /tmp/runtime-artifact/agentbox-runtime.oci.tar | awk '{print $1}')" = "$EXPECTED_OCI_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          git init -q /tmp/current-main
+          git -C /tmp/current-main remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C /tmp/current-main fetch -q --no-tags origin main
+          git -C /tmp/current-main rev-list --first-parent FETCH_HEAD | grep -Fx "$SOURCE_COMMIT" >/dev/null
+          ci_pages=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100")
+          jq -e --arg sha "$SOURCE_COMMIT" --arg repo "$GITHUB_REPOSITORY" '
+            [.[]|.workflow_runs[]|select(.head_sha==$sha and .name=="CI" and
+              .path==".github/workflows/ci.yml" and .event=="push" and
+              .head_branch=="main" and .head_repository.full_name==$repo and
+              .status=="completed" and .conclusion=="success")]|length>=1
+          ' <<<"$ci_pages" >/dev/null
+          state=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          latest_tag=$(jq -er '
+            [.[][]|select(.draft==false and .prerelease==false)|
+             select(.tag_name|test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))|
+             {tag:.tag_name,parts:(.tag_name[1:]|split(".")|map(tonumber))}]|sort_by(.parts)|last.tag
+          ' <<<"$state")
+          IFS=. read -r major minor patch <<<"$VERSION"
+          ((patch > 0))
+          test "$latest_tag" = "v$major.$minor.$((patch - 1))"
+          jq -e --arg tag "v$VERSION" --arg source "$SOURCE_COMMIT" '
+            [.[][]|select(.draft==true and .prerelease==false)] as $drafts |
+            ($drafts|length)==1 and $drafts[0].tag_name==$tag and
+            $drafts[0].target_commitish==$source
+          ' <<<"$state" >/dev/null
+          release=$(jq -ec --arg tag "v$VERSION" '[.[][]|select(.tag_name==$tag)]|if length==1 then .[0] else error("draft is ambiguous") end' <<<"$state")
+          jq -e --arg source "$SOURCE_COMMIT" --arg title "Agentbox v$VERSION" --arg version "$VERSION" '
+            .draft == true and .prerelease == false and .target_commitish == $source and
+            .name == $title and
+            ([.assets[].name] - [
+              "agentbox-"+$version+".tar.gz",
+              "agentbox-"+$version+".tar.gz.sha256",
+              "agentbox-"+$version+".provenance.json"
+            ] | length == 0) and
+            ([.assets[].name] | unique | length) == ([.assets[].name] | length)
+          ' <<<"$release" >/dev/null
+          asset_snapshot=$(jq -cS '[.assets[] | {id, name, digest}] | sort_by(.name, .id)' <<<"$release" | base64 -w0)
+          echo "asset_snapshot=$asset_snapshot" >>"$GITHUB_OUTPUT"
+          if object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" 2>/dev/null); then
+            type=$(jq -er .object.type <<<"$object"); source=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$source"); type=$(jq -er .object.type <<<"$object"); source=$(jq -er .object.sha <<<"$object"); fi
+            [[ "$type" == commit && "$source" == "$SOURCE_COMMIT" ]]
+          fi
+      - name: Install registry copier
+        run: sudo apt-get update && sudo apt-get install --yes skopeo
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck exact reservation immediately before registry mutation
+        id: final-draft-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
+        run: |
+          state=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          latest_tag=$(jq -er '[.[][]|select(.draft==false and .prerelease==false)|select(.tag_name|test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))|{tag:.tag_name,parts:(.tag_name[1:]|split(".")|map(tonumber))}]|sort_by(.parts)|last.tag' <<<"$state")
+          IFS=. read -r major minor patch <<<"$VERSION"
+          ((patch > 0))
+          test "$latest_tag" = "v$major.$minor.$((patch - 1))"
+          jq -e --arg tag "v$VERSION" --arg source "$SOURCE_COMMIT" '
+            [.[][]|select(.draft==true and .prerelease==false)] as $drafts |
+            ($drafts|length)==1 and $drafts[0].tag_name==$tag and
+            $drafts[0].target_commitish==$source
+          ' <<<"$state" >/dev/null
+          release=$(jq -ec --arg tag "v$VERSION" '[.[][]|select(.tag_name==$tag)]|if length==1 then .[0] else error("draft is ambiguous") end' <<<"$state")
+          live_snapshot=$(jq -cS '[.assets[] | {id, name, digest}] | sort_by(.name, .id)' <<<"$release" | base64 -w0)
+          test "$live_snapshot" = "$EXPECTED_DRAFT_ASSET_SNAPSHOT" || {
+            echo "draft asset identity changed after initial validation" >&2
+            exit 1
+          }
+          if object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" 2>/dev/null); then
+            type=$(jq -er .object.type <<<"$object"); source=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$source"); type=$(jq -er .object.type <<<"$object"); source=$(jq -er .object.sha <<<"$object"); fi
+            [[ "$type" == commit && "$source" == "$SOURCE_COMMIT" ]]
+          fi
+      - name: Reuse or narrowly replace existing runtime identity
+        id: existing-image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
+        run: |
+          verify_draft_snapshot() {
+            local release live_snapshot
+            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+            jq -e --arg source "$SOURCE_COMMIT" '
+              .draft==true and .prerelease==false and .target_commitish==$source
+            ' <<<"$release" >/dev/null
+            live_snapshot=$(jq -cS '[.assets[] | {id, name, digest}] | sort_by(.name, .id)' <<<"$release" | base64 -w0)
+            test "$live_snapshot" = "$EXPECTED_DRAFT_ASSET_SNAPSHOT" || {
+              echo "draft asset identity changed at the registry mutation boundary" >&2
+              exit 1
+            }
+            DRAFT_ASSET_COUNT=$(jq '.assets | length' <<<"$release")
+          }
+          verify_draft_snapshot
+          owner_type=$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type)
+          if [[ "$owner_type" == Organization ]]; then package_scope=orgs; else package_scope=users; fi
+          set +e
+          versions=$(gh api --paginate --slurp "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions?per_page=100" 2>/tmp/package-error)
+          package_status=$?
+          set -e
+          if ((package_status != 0)); then
+            grep -F 'HTTP 404' /tmp/package-error >/dev/null || { cat /tmp/package-error >&2; exit "$package_status"; }
+            test "$DRAFT_ASSET_COUNT" = 0 || {
+              echo "partial draft assets require an exact existing runtime before byte verification" >&2
+              exit 1
+            }
+            echo 'present=false' >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! jq -e --arg tag "v$VERSION" '[.[][]|.metadata.container.tags[]?]|index($tag)!=null' <<<"$versions" >/dev/null; then
+            test "$DRAFT_ASSET_COUNT" = 0 || {
+              echo "partial draft assets require an exact existing runtime before byte verification" >&2
+              exit 1
+            }
+            echo 'present=false' >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          descriptor=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest}}')
+          index=$(jq -er '.digest|select(test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor")
+          images=$(docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Image}}')
+          matches_source=true; replaceable_orphan=true
+          for platform in linux/amd64 linux/arm64; do
+            labels=$(jq -er --arg platform "$platform" '.[$platform].config.Labels' <<<"$images")
+            revision=$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")
+            [[ $revision == "$SOURCE_COMMIT" ]] || matches_source=false
+            [[ $revision =~ ^[0-9a-f]{40}$ ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" == "https://github.com/$GITHUB_REPOSITORY" ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" == "$VERSION" ]] || replaceable_orphan=false
+            [[ "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" == MIT ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.runtime-protocol"' <<<"$labels")" == 1 ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.instructions-sha256"' <<<"$labels")" == "$INSTRUCTIONS_SHA" ]] || replaceable_orphan=false
+            [[ "$(jq -r '."io.agentbox.statusline-sha256"' <<<"$labels")" == "$STATUSLINE_SHA" ]] || replaceable_orphan=false
+          done
+          [[ $replaceable_orphan == true ]] || matches_source=false
+          if [[ $matches_source != true ]]; then
+            test "$DRAFT_ASSET_COUNT" = 0 || {
+              echo "refusing image replacement until partial draft assets are byte-verified" >&2
+              exit 1
+            }
+            [[ $REPLACE_UNPUBLISHED_IMAGE == true ]] || { echo "v$VERSION exists but does not match the requested immutable source" >&2; exit 1; }
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1 && { echo "refusing to replace an image with an existing tag or release" >&2; exit 1; }
+            [[ $replaceable_orphan == true ]] || { echo "refusing to replace an image whose Agentbox metadata differs beyond revision" >&2; exit 1; }
+            visibility=$(gh api "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime" --jq .visibility)
+            [[ $visibility == private || $visibility == public ]] || { echo "unknown package visibility" >&2; exit 1; }
+            candidate=$(jq -c --arg tag "v$VERSION" '[.[][]|select(.metadata.container.tags|index($tag))]|if length==1 then .[0] else error("expected one tagged package version") end' <<<"$versions")
+            test "$(jq -c '.metadata.container.tags|sort' <<<"$candidate")" = "[\"v$VERSION\"]" || { echo "refusing to replace a package that carries another tag" >&2; exit 1; }
+            version_id=$(jq -er '.id|select(type=="number")' <<<"$candidate")
+            verify_draft_snapshot
+            test "$DRAFT_ASSET_COUNT" = 0
+            gh api --method DELETE "/$package_scope/$GITHUB_REPOSITORY_OWNER/packages/container/agentbox-runtime/versions/$version_id"
+            echo 'present=false' >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          echo 'present=true' >>"$GITHUB_OUTPUT"; echo "index=$index" >>"$GITHUB_OUTPUT"
+      - name: Publish transferred OCI archive
+        if: steps.existing-image.outputs.present != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
+        run: |
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+          jq -e --arg source "$SOURCE_COMMIT" '
+            .draft==true and .prerelease==false and .target_commitish==$source
+          ' <<<"$release" >/dev/null
+          live_snapshot=$(jq -cS '[.assets[] | {id, name, digest}] | sort_by(.name, .id)' <<<"$release" | base64 -w0)
+          test "$live_snapshot" = "$EXPECTED_DRAFT_ASSET_SNAPSHOT"
+          test "$(jq '.assets | length' <<<"$release")" = 0
+          skopeo copy --all --authfile "$HOME/.docker/config.json" \
+            "oci-archive:/tmp/runtime-artifact/agentbox-runtime.oci.tar" "docker://$IMAGE:v$VERSION"
       - name: Resolve and verify exact OCI identities
         id: identities
         env:
-          INDEX_DIGEST: ${{ steps.existing-image.outputs.index || steps.image.outputs.digest }}
+          EXISTING_INDEX: ${{ steps.existing-image.outputs.index }}
         run: |
-          [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "$IMAGE@$INDEX_DIGEST" --raw > /tmp/index.json
-          amd64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64" and (.platform.variant // "") == "") | .digest] | if length == 1 then .[0] else error("expected one amd64 manifest") end' /tmp/index.json)
-          arm64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64" and (.platform.variant // "") == "") | .digest] | if length == 1 then .[0] else error("expected one arm64 manifest") end' /tmp/index.json)
+          if [[ -n "$EXISTING_INDEX" ]]; then index=$EXISTING_INDEX; else index=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest}}' | jq -er .digest); fi
+          [[ "$index" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$index" --raw > /tmp/index.json
+          amd64=$(jq -er '[.manifests[]|select(.platform.os=="linux" and .platform.architecture=="amd64" and (.platform.variant//"")=="")|.digest]|if length==1 then .[0] else error("expected one amd64 manifest") end' /tmp/index.json)
+          arm64=$(jq -er '[.manifests[]|select(.platform.os=="linux" and .platform.architecture=="arm64" and (.platform.variant//"")=="")|.digest]|if length==1 then .[0] else error("expected one arm64 manifest") end' /tmp/index.json)
           [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "index=$INDEX_DIGEST" >>"$GITHUB_OUTPUT"
-          echo "amd64=$amd64" >>"$GITHUB_OUTPUT"
-          echo "arm64=$arm64" >>"$GITHUB_OUTPUT"
+          echo "index=$index" >>"$GITHUB_OUTPUT"; echo "amd64=$amd64" >>"$GITHUB_OUTPUT"; echo "arm64=$arm64" >>"$GITHUB_OUTPUT"
+
+  verify_image:
+    name: Verify published runtime without write credentials
+    needs: [plan, publish_image]
+    if: needs.publish_image.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/agentbox-runtime
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
       - name: Smoke the exact runtime entrypoint on both platforms
         run: |
-          docker run --rm --platform linux/amd64 \
-            "$IMAGE@${{ steps.identities.outputs.amd64 }}" --help | grep -F 'prepare'
-          docker run --rm --platform linux/arm64 \
-            "$IMAGE@${{ steps.identities.outputs.arm64 }}" --help | grep -F 'prepare'
-      - name: Verify anonymous exact-digest consumption
-        run: |
+          docker run --rm --platform linux/amd64 "$IMAGE@${{ needs.publish_image.outputs.amd64 }}" --help | grep -F prepare
+          docker run --rm --platform linux/arm64 "$IMAGE@${{ needs.publish_image.outputs.arm64 }}" --help | grep -F prepare
           install -d -m 0700 /tmp/anonymous-docker-config
-          docker --config /tmp/anonymous-docker-config buildx imagetools inspect \
-            "$IMAGE@${{ steps.identities.outputs.index }}" >/dev/null
+          docker --config /tmp/anonymous-docker-config buildx imagetools inspect "$IMAGE@${{ needs.publish_image.outputs.index }}" >/dev/null
+
+  render:
+    name: Render selected source with trusted current tooling
+    needs: [plan, publish_image, verify_image]
+    if: needs.verify_image.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      bundle_manifest_sha: ${{ steps.bundle.outputs.bundle_manifest_sha }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+      TOOLING_COMMIT: ${{ needs.plan.outputs.tooling_commit }}
+    steps:
+      - name: Check out selected source as inert payload
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source_commit }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out successful current release tooling separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.tooling_commit }}
+          path: tooling
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Render without write credentials
+        id: bundle
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C tooling rev-parse HEAD)" = "$TOOLING_COMMIT"
+          test "$(< source/VERSION)" = 0.0.0
+          test "$(jq -er .agentbox_version source/release-inputs.json)" = 0.0.0
+          test "$(jq -er .version source/package.json)" = 0.0.0
+          test "$(jq -er .version source/package-lock.json)" = 0.0.0
+          test "$(jq -er '.packages[""].version' source/package-lock.json)" = 0.0.0
+          test "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' source/Dockerfile)" = 1
+          test "$(grep -Ec '^ARG AGENTBOX_VERSION=' source/Dockerfile)" = 1
+          test "$(grep -Fxc '  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"' source/Formula/agentbox.rb)" = 1
+          test "$(grep -Fxc '  version "0.0.0"' source/Formula/agentbox.rb)" = 1
+          test "$(grep -Fxc '  sha256 "0000000000000000000000000000000000000000000000000000000000000000"' source/Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  url .*agentbox/releases/download/' source/Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  version ' source/Formula/agentbox.rb)" = 1
+          test "$(grep -Ec '^  sha256 ' source/Formula/agentbox.rb)" = 1
+          tooling/scripts/release.sh \
+            --source-root "$GITHUB_WORKSPACE/source" \
+            --version "$VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --index-digest '${{ needs.publish_image.outputs.index }}' \
+            --amd64-digest '${{ needs.publish_image.outputs.amd64 }}' \
+            --arm64-digest '${{ needs.publish_image.outputs.arm64 }}' \
+            --output-dir "$GITHUB_WORKSPACE/dist"
+          install -m 0444 source/Formula/agentbox.rb dist/source-agentbox.rb
+          (cd dist && sha256sum \
+            "agentbox-$VERSION.provenance.json" \
+            "agentbox-$VERSION.tar.gz" \
+            "agentbox-$VERSION.tar.gz.sha256" \
+            source-agentbox.rb | LC_ALL=C sort -k2) > dist/transfer.sha256
+          echo "bundle_manifest_sha=$(sha256sum dist/transfer.sha256 | awk '{print $1}')" >>"$GITHUB_OUTPUT"
+      - name: Transfer inert release bundle to fresh publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bundle-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
 
   publish:
     name: Publish or verify immutable release
-    if: github.ref == 'refs/heads/main'
-    needs: image
+    if: >-
+      !cancelled() && needs.plan.outputs.action != 'noop' &&
+      ((needs.plan.outputs.tap_repair_only == 'true' &&
+        (needs.plan.outputs.legacy_tap_only != 'true' || needs.legacy_preflight.result == 'success')) ||
+       (needs.plan.outputs.tap_repair_only != 'true' && needs.reserve.result == 'success' &&
+        needs.build_image.result == 'success' && needs.publish_image.result == 'success' &&
+        needs.verify_image.result == 'success' && needs.render.result == 'success'))
+    needs:
+      [
+        plan,
+        legacy_preflight,
+        reserve,
+        build_image,
+        publish_image,
+        verify_image,
+        render,
+      ]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release
     permissions:
       contents: read
     env:
-      VERSION: ${{ inputs.version }}
-      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+      EXPECTED_BUNDLE_MANIFEST_SHA: ${{ needs.render.outputs.bundle_manifest_sha }}
     steps:
-      - name: Check out the exact requested commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download inert rendered bundle
+        if: needs.plan.outputs.tap_repair_only != 'true'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          ref: ${{ inputs.source_commit }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Render manifest and deterministic release assets
+          name: release-bundle-${{ github.run_id }}
+          path: dist
+      - name: Verify transferred release bundle as inert data
+        if: needs.plan.outputs.tap_repair_only != 'true'
         run: |
-          scripts/release.sh \
-            --version "$VERSION" \
-            --source-commit "$SOURCE_COMMIT" \
-            --index-digest '${{ needs.image.outputs.index }}' \
-            --amd64-digest '${{ needs.image.outputs.amd64 }}' \
-            --arm64-digest '${{ needs.image.outputs.arm64 }}' \
-            --output-dir dist
+          expected=$(printf 'agentbox-%s.provenance.json\nagentbox-%s.tar.gz\nagentbox-%s.tar.gz.sha256\nsource-agentbox.rb\ntransfer.sha256' "$VERSION" "$VERSION" "$VERSION")
+          actual=$(find dist -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          test "$(sha256sum dist/transfer.sha256 | awk '{print $1}')" = "$EXPECTED_BUNDLE_MANIFEST_SHA"
+          (cd dist && sha256sum --check transfer.sha256)
+          jq -e --arg version "$VERSION" --arg source "$SOURCE_COMMIT" \
+            --arg index '${{ needs.publish_image.outputs.index }}' \
+            --arg amd64 '${{ needs.publish_image.outputs.amd64 }}' \
+            --arg arm64 '${{ needs.publish_image.outputs.arm64 }}' '
+              .agentbox_version == $version and .source_commit == $source and
+              .runtime_index_digest == $index and
+              .runtime_platform_digests["linux/amd64"] == $amd64 and
+              .runtime_platform_digests["linux/arm64"] == $arm64
+            ' "dist/agentbox-$VERSION.provenance.json" >/dev/null
       - name: Mint scoped release App token
+        if: needs.plan.outputs.tap_repair_only != 'true'
         id: release-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -244,10 +957,20 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-      - name: Create or resume a matching draft release
+          # Required to publish an older draft whose target changed workflow files.
+          permission-workflows: write
+      - name: Complete only the exact reserved draft release
+        if: needs.plan.outputs.tap_repair_only != 'true'
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: |
+          test "$VERSION" != 0.1.0 || {
+            echo "legacy v0.1.0 is prohibited from the release mutation path" >&2
+            exit 1
+          }
+          settings=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases")
+          jq -e '.enabled == true' <<<"$settings" >/dev/null
+
           verify_tag() {
             local object type sha
             object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION")
@@ -260,30 +983,71 @@ jobs:
             fi
             [[ "$type" == commit && "$sha" == "$SOURCE_COMMIT" ]]
           }
+          verify_cursor_and_draft() {
+            local state latest_tag major minor patch expected_base base base_version base_source
+            local expected_assets actual_assets asset asset_id api_digest actual_digest archive_sha
+            test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+            ancestry=$(gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_COMMIT...main" --jq .status)
+            [[ "$ancestry" == ahead || "$ancestry" == identical ]]
+            state=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+            latest_tag=$(jq -er '
+              [.[][]|select(.draft==false and .prerelease==false)|
+               select(.tag_name|test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))|
+               {tag:.tag_name,parts:(.tag_name[1:]|split(".")|map(tonumber))}]|
+              sort_by(.parts)|last.tag
+            ' <<<"$state")
+            IFS=. read -r major minor patch <<<"$VERSION"
+            ((patch > 0))
+            expected_base="v$major.$minor.$((patch - 1))"
+            test "$latest_tag" = "$expected_base"
+            jq -e --arg tag "v$VERSION" --arg source "$SOURCE_COMMIT" '
+              [.[][]|select(.draft==true and .prerelease==false)] as $drafts |
+              ($drafts|length)==1 and $drafts[0].tag_name==$tag and
+              $drafts[0].target_commitish==$source
+            ' <<<"$state" >/dev/null
+            base=$(jq -ec --arg tag "$expected_base" '[.[][]|select(.tag_name==$tag and .draft==false and .prerelease==false)]|if length==1 then .[0] else error("base release is ambiguous") end' <<<"$state")
+            base_version=${expected_base#v}
+            expected_assets=$(printf 'agentbox-%s.provenance.json\nagentbox-%s.tar.gz\nagentbox-%s.tar.gz.sha256' "$base_version" "$base_version" "$base_version")
+            actual_assets=$(jq -r '.assets[].name' <<<"$base" | LC_ALL=C sort)
+            test "$actual_assets" = "$expected_assets"
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$expected_base")
+            type=$(jq -er .object.type <<<"$object"); base_source=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$base_source"); type=$(jq -er .object.type <<<"$object"); base_source=$(jq -er .object.sha <<<"$object"); fi
+            [[ "$type" == commit && "$base_source" =~ ^[0-9a-f]{40}$ ]]
+            test "$(jq -er .target_commitish <<<"$base")" = "$base_source"
+            if [[ "$base_version" == 0.1.0 ]]; then
+              test "$base_source" = d2a9a8eebcbfa01f3684963998ee1554659c6443
+              jq -e '.id==389422097 and .immutable==false' <<<"$base" >/dev/null
+            else
+              jq -e '.immutable==true' <<<"$base" >/dev/null
+            fi
+            mkdir -p /tmp/base-release
+            for asset in "agentbox-$base_version.tar.gz" "agentbox-$base_version.tar.gz.sha256" "agentbox-$base_version.provenance.json"; do
+              asset_id=$(jq -er --arg asset "$asset" '[.assets[]|select(.name==$asset)]|if length==1 then .[0].id else error("base asset is ambiguous") end' <<<"$base")
+              api_digest=$(jq -er --arg asset "$asset" '[.assets[]|select(.name==$asset)]|.[0].digest|select(test("^sha256:[0-9a-f]{64}$"))' <<<"$base")
+              gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"/tmp/base-release/$asset"
+              actual_digest="sha256:$(sha256sum "/tmp/base-release/$asset"|awk '{print $1}')"
+              test "$actual_digest" = "$api_digest"
+            done
+            archive_sha=$(sha256sum "/tmp/base-release/agentbox-$base_version.tar.gz"|awk '{print $1}')
+            grep -Fx "$archive_sha  agentbox-$base_version.tar.gz" "/tmp/base-release/agentbox-$base_version.tar.gz.sha256" >/dev/null
+            jq -e --arg version "$base_version" --arg source "$base_source" --arg sha "$archive_sha" '
+              .agentbox_version==$version and .source_commit==$source and
+              .archive==("agentbox-"+$version+".tar.gz") and .archive_sha256==$sha
+            ' "/tmp/base-release/agentbox-$base_version.provenance.json" >/dev/null
+          }
+          verify_cursor_and_draft
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           matches=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' <<<"$releases")
           count=$(jq 'length' <<<"$matches")
-          ((count <= 1)) || { echo "multiple releases use tag v$VERSION" >&2; exit 1; }
-          if ((count == 0)); then
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
-              verify_tag || { echo "existing tag does not identify the requested source commit" >&2; exit 1; }
-              target_args=(--verify-tag)
-            else
-              target_args=(--target "$SOURCE_COMMIT")
-            fi
-            gh release create "v$VERSION" "${target_args[@]}" \
-              --draft --title "Agentbox v$VERSION" --generate-notes
-            releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-            matches=$(jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)]' <<<"$releases")
-            [[ "$(jq 'length' <<<"$matches")" == 1 ]]
-          fi
+          test "$count" = 1
           release=$(jq -c '.[0]' <<<"$matches")
           jq -e --arg source "$SOURCE_COMMIT" --arg title "Agentbox v$VERSION" '
-            .target_commitish == $source and .name == $title and
-            (.draft | type == "boolean") and .prerelease == false
+            .name == $title and .draft == true and .prerelease == false and
+            .target_commitish == $source
           ' <<<"$release" >/dev/null || { echo "existing release metadata differs" >&2; exit 1; }
-          if [[ "$(jq -r .draft <<<"$release")" == false ]]; then
-            verify_tag || { echo "existing release tag does not identify the requested source commit" >&2; exit 1; }
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            verify_tag || { echo "draft tag does not identify the requested source commit" >&2; exit 1; }
           fi
           expected=$(printf 'agentbox-%s.provenance.json\nagentbox-%s.tar.gz\nagentbox-%s.tar.gz.sha256' \
             "$VERSION" "$VERSION" "$VERSION")
@@ -307,10 +1071,6 @@ jobs:
                 exit 1
               }
             else
-              [[ "$(jq -r .draft <<<"$release")" == true ]] || {
-                echo "published release is missing asset: $asset" >&2
-                exit 1
-              }
               gh release upload "v$VERSION" "dist/$asset"
             fi
           done
@@ -318,10 +1078,77 @@ jobs:
             jq -c --arg tag "v$VERSION" '[.[][] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("release disappeared") end')
           actual=$(jq -r '.assets[].name' <<<"$release" | LC_ALL=C sort)
           [[ "$actual" == "$expected" ]] || { echo "release asset set is incomplete" >&2; exit 1; }
-          if [[ "$(jq -r .draft <<<"$release")" == true ]]; then
-            gh release edit "v$VERSION" --draft=false
+          # The tag may have appeared after upload; fail before the immutable commit point.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            verify_tag || { echo "draft tag changed before publication" >&2; exit 1; }
           fi
+          verify_cursor_and_draft
+          gh release edit "v$VERSION" --draft=false
           verify_tag || { echo "published release tag does not identify the requested source commit" >&2; exit 1; }
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+          jq -e '.draft == false and .prerelease == false' <<<"$release" >/dev/null
+          jq -e '.immutable == true' <<<"$release" >/dev/null || {
+            echo "published release did not read back as immutable" >&2
+            exit 1
+          }
+          for asset in \
+            "agentbox-$VERSION.tar.gz" \
+            "agentbox-$VERSION.tar.gz.sha256" \
+            "agentbox-$VERSION.provenance.json"; do
+            local_digest="sha256:$(sha256sum "dist/$asset" | awk '{print $1}')"
+            api_digest=$(jq -er --arg asset "$asset" \
+              '[.assets[] | select(.name == $asset)] |
+               if length == 1 then .[0].digest else error("asset identity is ambiguous") end' \
+              <<<"$release")
+            test "$api_digest" = "$local_digest"
+          done
+      - name: Download exact published assets for tap-only repair
+        if: needs.plan.outputs.tap_repair_only == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEGACY_SOURCE: d2a9a8eebcbfa01f3684963998ee1554659c6443
+        run: |
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+          jq -e --arg source "$SOURCE_COMMIT" --arg version "$VERSION" '
+            .tag_name == ("v"+$version) and .target_commitish == $source and
+            .draft == false and .prerelease == false and
+            ([.assets[].name] | sort) == (["agentbox-"+$version+".provenance.json","agentbox-"+$version+".tar.gz","agentbox-"+$version+".tar.gz.sha256"] | sort)
+          ' <<<"$release" >/dev/null
+          if [[ "$VERSION" == 0.1.0 ]]; then
+            test "$SOURCE_COMMIT" = "$LEGACY_SOURCE"
+            jq -e '.id == 389422097 and .immutable == false' <<<"$release" >/dev/null
+          else
+            jq -e '.immutable == true' <<<"$release" >/dev/null
+          fi
+          tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION")
+          tag_type=$(jq -er .object.type <<<"$tag_object")
+          tag_source=$(jq -er .object.sha <<<"$tag_object")
+          if [[ "$tag_type" == tag ]]; then
+            tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_source")
+            tag_type=$(jq -er .object.type <<<"$tag_object")
+            tag_source=$(jq -er .object.sha <<<"$tag_object")
+          fi
+          [[ "$tag_type" == commit && "$tag_source" == "$SOURCE_COMMIT" ]]
+
+          mkdir -p dist
+          while read -r asset expected_digest; do
+            asset_id=$(jq -er --arg asset "$asset" '
+              [.assets[] | select(.name == $asset)] |
+              if length == 1 then .[0].id else error("legacy asset identity is ambiguous") end
+            ' <<<"$release")
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"dist/$asset"
+            actual_digest="sha256:$(sha256sum "dist/$asset" | awk '{print $1}')"
+            test "$actual_digest" = "$expected_digest"
+          done < <(jq -r '.assets[] | [.name,.digest] | @tsv' <<<"$release")
+          archive_sha=$(sha256sum "dist/agentbox-$VERSION.tar.gz" | awk '{print $1}')
+          grep -Fx "$archive_sha  agentbox-$VERSION.tar.gz" "dist/agentbox-$VERSION.tar.gz.sha256" >/dev/null
+          jq -e --arg version "$VERSION" --arg source "$SOURCE_COMMIT" --arg archive_sha "$archive_sha" '
+            .agentbox_version == $version and .source_commit == $source and
+            .archive == ("agentbox-"+$version+".tar.gz") and .archive_sha256 == $archive_sha
+          ' "dist/agentbox-$VERSION.provenance.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/contents/Formula/agentbox.rb?ref=$SOURCE_COMMIT" --jq .content |
+            base64 --decode > dist/source-agentbox.rb
       - name: Mint separately scoped tap App token
         id: tap-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -350,7 +1177,7 @@ jobs:
         run: |
           ARCHIVE_SHA=$(awk '{print $1}' "../dist/agentbox-$VERSION.tar.gz.sha256")
           export ARCHIVE_SHA
-          cp ../Formula/agentbox.rb Formula/agentbox.rb
+          cp ../dist/source-agentbox.rb Formula/agentbox.rb
           python3 - <<'PY'
           import os
           import pathlib
@@ -462,3 +1289,256 @@ jobs:
           }
           test "$(gh pr view "$TAP_PR" --repo "$repo" --json headRefOid --jq .headRefOid)" = "$head"
           gh pr merge "$TAP_PR" --repo "$repo" --squash --delete-branch --match-head-commit "$head"
+      - name: Read back exact tap state
+        id: tap-state
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+        run: |
+          archive_sha=$(awk '{print $1}' "dist/agentbox-$VERSION.tar.gz.sha256")
+          [[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]]
+          formula=$(gh api \
+            "repos/$GITHUB_REPOSITORY_OWNER/homebrew-tap/contents/Formula/agentbox.rb?ref=main" \
+            --jq .content | base64 --decode)
+          grep -Fx "  version \"$VERSION\"" <<<"$formula" >/dev/null
+          grep -Fx "  sha256 \"$archive_sha\"" <<<"$formula" >/dev/null
+          grep -Fx "  url \"https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/agentbox-$VERSION.tar.gz\"" \
+            <<<"$formula" >/dev/null
+          echo "state=exact" >>"$GITHUB_OUTPUT"
+
+  post_plan:
+    name: Recompute durable planner state after reconciliation
+    if: always()
+    needs:
+      [
+        plan,
+        legacy_preflight,
+        reserve,
+        build_image,
+        publish_image,
+        verify_image,
+        render,
+        publish,
+      ]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      action: ${{ steps.live-plan.outputs.action }}
+      reason: ${{ steps.live-plan.outputs.reason }}
+      backlog_count: ${{ steps.live-plan.outputs.backlog_count }}
+      oldest_pending_commit: ${{ steps.live-plan.outputs.oldest_pending_commit }}
+      oldest_pending_status: ${{ steps.live-plan.outputs.oldest_pending_status }}
+    steps:
+      - name: Check out current trusted planner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recompute live release cursor and backlog
+        id: live-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)" = main
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > /tmp/releases.json
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+            > /tmp/ci-pages.json
+          jq '[.[]|.workflow_runs[]]' /tmp/ci-pages.json > /tmp/ci-runs.json
+          : > /tmp/tag-bindings.ndjson
+          while read -r tag; do
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            type=$(jq -er .object.type <<<"$object")
+            source=$(jq -er .object.sha <<<"$object")
+            if [[ "$type" == tag ]]; then
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$source")
+              type=$(jq -er .object.type <<<"$object")
+              source=$(jq -er .object.sha <<<"$object")
+            fi
+            [[ "$type" == commit && "$source" =~ ^[0-9a-f]{40}$ ]]
+            jq -cn --arg tag "$tag" --arg source "$source" '{key:$tag,value:$source}' >> /tmp/tag-bindings.ndjson
+          done < <(jq -r '.[][]|select(.draft==false and .prerelease==false)|.tag_name|select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' /tmp/releases.json)
+          jq -s from_entries /tmp/tag-bindings.ndjson > /tmp/tag-bindings.json
+          jq --slurpfile bindings /tmp/tag-bindings.json '
+            map(map(if .draft==false and .prerelease==false and
+              (.tag_name|test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              then .+{source_commit:$bindings[0][.tag_name]} else . end))
+          ' /tmp/releases.json > /tmp/releases-bound.json
+          : > /tmp/commits.ndjson
+          while read -r commit; do
+            source_sentinel=false; dockerfile_sentinel=false; formula_sentinel=false
+            if [[ "$(git show "$commit:VERSION" 2>/dev/null || true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:release-inputs.json" 2>/dev/null|jq -er .agentbox_version 2>/dev/null||true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package.json" 2>/dev/null|jq -er .version 2>/dev/null||true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package-lock.json" 2>/dev/null|jq -er .version 2>/dev/null||true)" == 0.0.0 ]] &&
+               [[ "$(git show "$commit:package-lock.json" 2>/dev/null|jq -er '.packages[""].version' 2>/dev/null||true)" == 0.0.0 ]]; then source_sentinel=true; fi
+            dockerfile=$(git show "$commit:Dockerfile" 2>/dev/null||true)
+            if [[ "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' <<<"$dockerfile")" == 1 ]] &&
+               [[ "$(grep -Ec '^ARG AGENTBOX_VERSION=' <<<"$dockerfile")" == 1 ]]; then dockerfile_sentinel=true; fi
+            formula=$(git show "$commit:Formula/agentbox.rb" 2>/dev/null||true)
+            if [[ "$(grep -Fxc '  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  version "0.0.0"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Fxc '  sha256 "0000000000000000000000000000000000000000000000000000000000000000"' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  url .*agentbox/releases/download/' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  version ' <<<"$formula")" == 1 ]] &&
+               [[ "$(grep -Ec '^  sha256 ' <<<"$formula")" == 1 ]]; then formula_sentinel=true; fi
+            jq -cn --arg sha "$commit" --argjson source "$source_sentinel" \
+              --argjson dockerfile "$dockerfile_sentinel" --argjson formula "$formula_sentinel" \
+              '{sha:$sha,source_sentinel:$source,dockerfile_sentinel:$dockerfile,formula_sentinel:$formula}' >> /tmp/commits.ndjson
+          done < <(git rev-list --first-parent --reverse origin/main)
+          jq -s . /tmp/commits.ndjson > /tmp/commits.json
+          plan=$(python3 scripts/plan-release.py --releases /tmp/releases-bound.json --commits /tmp/commits.json --ci-runs /tmp/ci-runs.json)
+          jq -e '
+            ([keys[]]|sort)==["action","backlog_count","oldest_pending_commit","oldest_pending_status","reason","source_commit","version"] and
+            (.action|IN("publish","resume","noop")) and (.reason|type=="string") and
+            (.backlog_count|type=="number" and .>=0 and floor==.) and
+            (.oldest_pending_status|IN("eligible","awaiting_ci","none")) and
+            (if .oldest_pending_status=="none" then .oldest_pending_commit==""
+             else (.oldest_pending_commit|test("^[0-9a-f]{40}$")) end)
+          ' <<<"$plan" >/dev/null
+          jq -cS . <<<"$plan"
+          {
+            echo "action=$(jq -r .action <<<"$plan")"
+            printf 'reason=%s\n' "$(jq -c .reason <<<"$plan")"
+            echo "backlog_count=$(jq -r .backlog_count <<<"$plan")"
+            echo "oldest_pending_commit=$(jq -r .oldest_pending_commit <<<"$plan")"
+            echo "oldest_pending_status=$(jq -r .oldest_pending_status <<<"$plan")"
+          } >>"$GITHUB_OUTPUT"
+
+  status:
+    name: Summarize durable release state and continue backlog
+    if: always()
+    needs:
+      [
+        plan,
+        legacy_preflight,
+        reserve,
+        build_image,
+        publish_image,
+        verify_image,
+        render,
+        publish,
+        post_plan,
+      ]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    env:
+      INITIAL_ACTION: ${{ needs.plan.outputs.action }}
+      INITIAL_REASON: ${{ needs.plan.outputs.reason }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+      TOOLING_COMMIT: ${{ needs.plan.outputs.tooling_commit }}
+      INITIAL_BACKLOG_COUNT: ${{ needs.plan.outputs.backlog_count }}
+      FINAL_ACTION: ${{ needs.post_plan.outputs.action }}
+      FINAL_REASON: ${{ needs.post_plan.outputs.reason }}
+      FINAL_BACKLOG_COUNT: ${{ needs.post_plan.outputs.backlog_count }}
+      OLDEST_PENDING_COMMIT: ${{ needs.post_plan.outputs.oldest_pending_commit }}
+      OLDEST_PENDING_STATUS: ${{ needs.post_plan.outputs.oldest_pending_status }}
+      PLAN_RESULT: ${{ needs.plan.result }}
+      RESERVE_RESULT: ${{ needs.reserve.result }}
+      BUILD_RESULT: ${{ needs.build_image.result }}
+      IMAGE_RESULT: ${{ needs.publish_image.result }}
+      VERIFY_RESULT: ${{ needs.verify_image.result }}
+      RENDER_RESULT: ${{ needs.render.result }}
+      PUBLISH_RESULT: ${{ needs.publish.result }}
+      POST_PLAN_RESULT: ${{ needs.post_plan.result }}
+      INDEX_DIGEST: ${{ needs.publish_image.outputs.index }}
+      AMD64_DIGEST: ${{ needs.publish_image.outputs.amd64 }}
+      ARM64_DIGEST: ${{ needs.publish_image.outputs.arm64 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Write terminal summary and enqueue one bounded continuation
+        run: |
+          release_state=not-selected
+          immutable=unknown
+          archive_digest=unknown
+          tap_state=unknown
+          tap_pr=none
+          tap_head=none
+          tap_checks=none
+          cursor_version=unknown
+          cursor_source=unknown
+          cursor_immutable=unknown
+          oldest_pending_time=none
+          oldest_pending_age_seconds=none
+          if [[ "$OLDEST_PENDING_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            oldest_pending_time=$(gh api "repos/$GITHUB_REPOSITORY/commits/$OLDEST_PENDING_COMMIT" --jq .commit.committer.date 2>/dev/null || printf unknown)
+            if pending_epoch=$(date -d "$oldest_pending_time" +%s 2>/dev/null); then
+              oldest_pending_age_seconds=$(($(date +%s) - pending_epoch))
+            fi
+          fi
+          if releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" 2>/dev/null); then
+            cursor=$(jq -c '
+              [.[][]|select(.draft==false and .prerelease==false)|
+               select(.tag_name|test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))|
+               .+{parts:(.tag_name[1:]|split(".")|map(tonumber))}]|sort_by(.parts)|last
+            ' <<<"$releases")
+            cursor_version=$(jq -r '.tag_name // "unknown"' <<<"$cursor")
+            cursor_source=$(jq -r '.target_commitish // "unknown"' <<<"$cursor")
+            cursor_immutable=$(jq -r '.immutable // false' <<<"$cursor")
+          fi
+          report_version=$VERSION
+          if [[ ! "$report_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$cursor_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            report_version=${cursor_version#v}
+          fi
+          if [[ "$report_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$report_version" 2>/dev/null); then
+              release_state=$(jq -r 'if .draft then "draft" else "published" end' <<<"$release")
+              immutable=$(jq -r '.immutable // false' <<<"$release")
+              archive_digest=$(jq -r --arg asset "agentbox-$report_version.tar.gz" '[.assets[]|select(.name==$asset)]|if length==1 then .[0].digest else "missing" end' <<<"$release")
+              if [[ ! "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                provenance_id=$(jq -r --arg asset "agentbox-$report_version.provenance.json" '[.assets[]|select(.name==$asset)]|if length==1 then .[0].id else empty end' <<<"$release")
+                if [[ -n "$provenance_id" ]] && gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$provenance_id" >/tmp/status-provenance.json 2>/dev/null; then
+                  INDEX_DIGEST=$(jq -r '.runtime_index_digest // ""' /tmp/status-provenance.json)
+                  AMD64_DIGEST=$(jq -r '.runtime_platform_digests["linux/amd64"] // ""' /tmp/status-provenance.json)
+                  ARM64_DIGEST=$(jq -r '.runtime_platform_digests["linux/arm64"] // ""' /tmp/status-provenance.json)
+                fi
+              fi
+            fi
+            if formula=$(gh api "repos/$GITHUB_REPOSITORY_OWNER/homebrew-tap/contents/Formula/agentbox.rb?ref=main" --jq .content 2>/dev/null | base64 --decode); then
+              if [[ "$archive_digest" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+                 grep -Fx "  version \"$report_version\"" <<<"$formula" >/dev/null &&
+                 grep -Fx "  sha256 \"${archive_digest#sha256:}\"" <<<"$formula" >/dev/null &&
+                 grep -Fx "  url \"https://github.com/$GITHUB_REPOSITORY/releases/download/v$report_version/agentbox-$report_version.tar.gz\"" <<<"$formula" >/dev/null; then
+                tap_state=exact
+              else
+                tap_state=mismatch
+              fi
+            fi
+            prs=$(gh pr list --repo "$GITHUB_REPOSITORY_OWNER/homebrew-tap" --head "release/agentbox-v$report_version" --state open --json number,headRefOid 2>/dev/null || printf '[]')
+            if [[ "$(jq length <<<"$prs")" == 1 ]]; then
+              tap_pr=$(jq -r '.[0].number' <<<"$prs")
+              tap_head=$(jq -r '.[0].headRefOid' <<<"$prs")
+              tap_checks=$(gh api "repos/$GITHUB_REPOSITORY_OWNER/homebrew-tap/commits/$tap_head/check-runs?per_page=100" --jq '[.check_runs[]|{name,conclusion}]' 2>/dev/null || printf 'unavailable')
+            fi
+          fi
+          {
+            echo '## Release reconciliation'
+            echo
+            echo '| field | value |'
+            echo '| --- | --- |'
+            printf '| initial plan | `%s` — `%s`; backlog `%s` |\n' "${INITIAL_ACTION:-unavailable}" "${INITIAL_REASON:-unavailable}" "${INITIAL_BACKLOG_COUNT:-unknown}"
+            printf '| post-run plan | `%s` — `%s` |\n' "${FINAL_ACTION:-unavailable}" "${FINAL_REASON:-unavailable}"
+            printf '| version / source | `%s` / `%s` |\n' "${VERSION:-none}" "${SOURCE_COMMIT:-none}"
+            printf '| trusted tooling | `%s` |\n' "${TOOLING_COMMIT:-none}"
+            printf '| published cursor | `%s` at `%s`; immutable `%s` |\n' "$cursor_version" "$cursor_source" "$cursor_immutable"
+            printf '| live cursor backlog | `%s`; oldest `%s` (`%s`, `%s`, age `%s`s) |\n' "${FINAL_BACKLOG_COUNT:-unknown}" "${OLDEST_PENDING_COMMIT:-none}" "${OLDEST_PENDING_STATUS:-unknown}" "$oldest_pending_time" "$oldest_pending_age_seconds"
+            printf '| jobs | plan=%s reserve=%s build=%s image=%s verify=%s render=%s publish=%s post-plan=%s |\n' "$PLAN_RESULT" "$RESERVE_RESULT" "$BUILD_RESULT" "$IMAGE_RESULT" "$VERIFY_RESULT" "$RENDER_RESULT" "$PUBLISH_RESULT" "$POST_PLAN_RESULT"
+            printf '| OCI | index `%s`; amd64 `%s`; arm64 `%s` |\n' "${INDEX_DIGEST:-not-run}" "${AMD64_DIGEST:-not-run}" "${ARM64_DIGEST:-not-run}"
+            printf '| GitHub release | state `%s`; immutable `%s`; archive `%s` |\n' "$release_state" "$immutable" "$archive_digest"
+            printf '| tap | main `%s`; PR `%s`; head `%s`; checks `%s` |\n' "$tap_state" "$tap_pr" "$tap_head" "$tap_checks"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if [[ "$PUBLISH_RESULT" == success && "$POST_PLAN_RESULT" == success && "$FINAL_BACKLOG_COUNT" =~ ^[0-9]+$ ]]; then
+            if ((FINAL_BACKLOG_COUNT > 0)); then
+              gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main
+              printf '\nQueued continuation for %d live eligible commit(s).\n' "$FINAL_BACKLOG_COUNT" >>"$GITHUB_STEP_SUMMARY"
+            fi
+          fi
