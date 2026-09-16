@@ -479,9 +479,11 @@ jobs:
               echo "refusing to reserve v$VERSION because its tag exists without a release" >&2
               exit 1
             fi
-            gh release create "v$VERSION" --target "$SOURCE_COMMIT" --draft --title "Agentbox v$VERSION" --generate-notes
-            matches=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -c --arg tag "v$VERSION" '[.[][]|select(.tag_name==$tag)]')
-            test "$(jq length <<<"$matches")" = 1
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="v$VERSION" -f target_commitish="$SOURCE_COMMIT" \
+              -f name="Agentbox v$VERSION" -F draft=true -F prerelease=false \
+              -F generate_release_notes=true > /tmp/created-release.json
+            matches=$(jq -c '[.]' /tmp/created-release.json)
           fi
           jq -e --arg source "$SOURCE_COMMIT" --arg title "Agentbox v$VERSION" --arg version "$VERSION" '
             .[0].draft == true and .[0].prerelease == false and

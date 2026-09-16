@@ -683,8 +683,10 @@ test("automatic release workflows encode trusted wakeups and immutable publicati
   assert.match(reserve, /test "\$actual_cursor_digest" = "\$EXPECTED_CURSOR_DIGEST"/);
   assert.match(reserve, /git -C \/tmp\/repository rev-list --first-parent FETCH_HEAD \| grep -Fx "\$SOURCE_COMMIT"/);
   const tagPrecheck = reserve.indexOf('git/ref/tags/v$VERSION');
-  const createDraft = reserve.indexOf('gh release create "v$VERSION"');
+  const createDraft = reserve.indexOf('gh api --method POST "repos/$GITHUB_REPOSITORY/releases"');
   assert.ok(tagPrecheck >= 0 && tagPrecheck < createDraft, "draft tag must be checked before reservation");
+  assert.doesNotMatch(reserve, /gh release create/);
+  assert.match(reserve, /-f target_commitish="\$SOURCE_COMMIT"/);
   assert.match(reserve, /\.\[0\]\.draft == true[\s\S]{0,180}\.\[0\]\.target_commitish == \$source/);
 
   const buildImage = releaseJob("build_image", "publish_image");
