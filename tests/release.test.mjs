@@ -699,6 +699,10 @@ test("automatic release workflows encode trusted wakeups and immutable publicati
   const publishImage = releaseJob("publish_image", "verify_image");
   assert.match(publishImage, /packages: write/);
   assert.match(publishImage, /Download inert OCI archive/);
+  assert.match(publishImage, /Mint scoped draft read token/);
+  assert.match(publishImage, /permission-contents: read/);
+  assert.match(publishImage, /RELEASE_TOKEN: \$\{\{ steps\.draft-read-token\.outputs\.token \}\}/);
+  assert.match(publishImage, /GH_TOKEN="\$RELEASE_TOKEN" gh api[^\n]*releases/);
   assert.match(publishImage, /Verify exact draft reservation before image mutation/);
   assert.match(publishImage, /Recheck exact reservation immediately before registry mutation/);
   assert.match(publishImage, /\(\$drafts\|length\)==1/);
@@ -914,14 +918,14 @@ test("workflow revalidates canonical draft assets at every registry mutation bou
     publishImage.indexOf("Recheck exact reservation immediately before registry mutation"),
     publishImage.indexOf("Reuse or narrowly replace existing runtime identity"),
   );
-  assert.match(postLogin, /gh api --paginate --slurp "repos\/\$GITHUB_REPOSITORY\/releases\?per_page=100"/);
+  assert.match(postLogin, /GH_TOKEN="\$RELEASE_TOKEN" gh api --paginate --slurp "repos\/\$GITHUB_REPOSITORY\/releases\?per_page=100"/);
   assert.match(postLogin, /test "\$live_snapshot" = "\$EXPECTED_DRAFT_ASSET_SNAPSHOT"/);
 
   const registryDecision = publishImage.slice(
     publishImage.indexOf("Reuse or narrowly replace existing runtime identity"),
     publishImage.indexOf("Publish transferred OCI archive"),
   );
-  assert.match(registryDecision, /verify_draft_snapshot\(\)[\s\S]*release=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/releases\/tags\/v\$VERSION"\)/);
+  assert.match(registryDecision, /verify_draft_snapshot\(\)[\s\S]*release=\$\(GH_TOKEN="\$RELEASE_TOKEN" gh api "repos\/\$GITHUB_REPOSITORY\/releases\/tags\/v\$VERSION"\)/);
   assert.match(registryDecision, /DRAFT_ASSET_COUNT=\$\(jq '\.assets \| length' <<<"\$release"\)/);
   assert.match(registryDecision, /verify_draft_snapshot[\s\S]{0,100}test "\$DRAFT_ASSET_COUNT" = 0[\s\S]{0,180}gh api --method DELETE/);
 
