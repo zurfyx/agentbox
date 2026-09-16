@@ -720,7 +720,10 @@ jobs:
         run: |
           verify_draft_snapshot() {
             local release live_snapshot
-            release=$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+            release=$(GH_TOKEN="$RELEASE_TOKEN" gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -ec --arg tag "v$VERSION" \
+                '[.[][] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("draft is ambiguous") end')
             jq -e --arg source "$SOURCE_COMMIT" '
               .draft==true and .prerelease==false and .target_commitish==$source
             ' <<<"$release" >/dev/null
@@ -796,7 +799,10 @@ jobs:
           RELEASE_TOKEN: ${{ steps.draft-read-token.outputs.token }}
           EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
         run: |
-          release=$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+          release=$(GH_TOKEN="$RELEASE_TOKEN" gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -ec --arg tag "v$VERSION" \
+              '[.[][] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("draft is ambiguous") end')
           jq -e --arg source "$SOURCE_COMMIT" '
             .draft==true and .prerelease==false and .target_commitish==$source
           ' <<<"$release" >/dev/null

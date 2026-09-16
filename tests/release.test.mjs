@@ -925,7 +925,7 @@ test("workflow revalidates canonical draft assets at every registry mutation bou
     publishImage.indexOf("Reuse or narrowly replace existing runtime identity"),
     publishImage.indexOf("Publish transferred OCI archive"),
   );
-  assert.match(registryDecision, /verify_draft_snapshot\(\)[\s\S]*release=\$\(GH_TOKEN="\$RELEASE_TOKEN" gh api "repos\/\$GITHUB_REPOSITORY\/releases\/tags\/v\$VERSION"\)/);
+  assert.match(registryDecision, /verify_draft_snapshot\(\)[\s\S]*GH_TOKEN="\$RELEASE_TOKEN" gh api --paginate --slurp[\s\S]*releases\?per_page=100/);
   assert.match(registryDecision, /DRAFT_ASSET_COUNT=\$\(jq '\.assets \| length' <<<"\$release"\)/);
   assert.match(registryDecision, /verify_draft_snapshot[\s\S]{0,100}test "\$DRAFT_ASSET_COUNT" = 0[\s\S]{0,180}gh api --method DELETE/);
 
