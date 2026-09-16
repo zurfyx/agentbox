@@ -148,30 +148,27 @@ test("vendor updater inspects downloads but never executes them", () => {
   assert.doesNotMatch(source, /\$tmp_dir\/codex-[^\n]*\/bin\/codex[^\n]*--version/);
 });
 
-test("vendor updater changes exactly the four coherent version files", () => {
+test("vendor updater and workflow allowlist only release-inputs.json", () => {
   const updater = readFileSync(resolve(ROOT, "scripts/update-versions.sh"), "utf8");
-  assert.match(updater, /version_file=VERSION/);
   assert.match(updater, /mv "\$tmp_dir\/release-inputs\.json" "\$input"/);
-  assert.match(updater, /mv "\$tmp_dir\/VERSION" "\$version_file"/);
-  assert.match(updater, /mv "\$tmp_dir\/package\.json" package\.json/);
-  assert.match(updater, /mv "\$tmp_dir\/package-lock\.json" package-lock\.json/);
+  assert.doesNotMatch(updater, /mv .*\b(?:VERSION|package\.json|package-lock\.json)\b/);
+  assert.match(updater, /Claude channel moved backwards/);
+  assert.match(updater, /Codex channel moved backwards/);
+  assert.match(updater, /metadata changed without a version change/);
   const workflow = readFileSync(resolve(ROOT, ".github/workflows/update.yml"), "utf8");
-  assert.match(
-    workflow,
-    /expected=\$'VERSION\\npackage-lock\.json\\npackage\.json\\nrelease-inputs\.json'/,
-  );
-  assert.match(
-    workflow,
-    /git add -- VERSION package\.json package-lock\.json release-inputs\.json/,
-  );
+  assert.match(workflow, /\(\(\$\{#changed\[@\]\} != 1\)\)/);
+  assert.match(workflow, /"\$\{changed\[0\]\}" != release-inputs\.json/);
+  assert.match(workflow, /git add -- release-inputs\.json/);
+  assert.match(workflow, /branch=automation\/vendor-update/);
   assert.match(workflow, /expected_author="\$APP_SLUG\[bot\]"/);
   assert.match(workflow, /headRefOid/);
   assert.match(workflow, /--force-with-lease="refs\/heads\/\$branch:\$remote_oid"/);
 });
 
-test("updater --write produces a coherent bumped tree", (t) => {
+test("updater --write changes only vendor inputs and retains source sentinels", (t) => {
   if (process.env.AGENTBOX_SKIP_NESTED_GATE === "1") {
     const version = readFileSync(resolve(ROOT, "VERSION"), "utf8").trim();
+    assert.equal(version, "0.0.0");
     assert.equal(JSON.parse(readFileSync(resolve(ROOT, "release-inputs.json"))).agentbox_version, version);
     assert.equal(JSON.parse(readFileSync(resolve(ROOT, "package.json"))).version, version);
     const lock = JSON.parse(readFileSync(resolve(ROOT, "package-lock.json")));
@@ -219,21 +216,27 @@ esac
 `,
   );
 
-  const before = readFileSync(resolve(tree, "VERSION"), "utf8").trim();
-  const [major, minor, patch] = before.split(".").map(Number);
-  const after = `${major}.${minor}.${patch + 1}`;
+  const sourceFiles = ["VERSION", "package.json", "package-lock.json", "Formula/agentbox.rb"];
+  const before = new Map(
+    sourceFiles.map((path) => [path, readFileSync(resolve(tree, path))]),
+  );
   const update = run("bash", ["scripts/update-versions.sh", "--write"], {
     cwd: tree,
     env: { PATH: `${fakeBin}:${process.env.PATH}` },
     timeout: 30_000,
   });
   expectExit(update, 0, "fixture updater write");
-  assert.equal(readFileSync(resolve(tree, "VERSION"), "utf8"), `${after}\n`);
-  assert.equal(JSON.parse(readFileSync(resolve(tree, "release-inputs.json"))).agentbox_version, after);
-  assert.equal(JSON.parse(readFileSync(resolve(tree, "package.json"))).version, after);
+  for (const [path, contents] of before) {
+    assert.deepEqual(readFileSync(resolve(tree, path)), contents, `${path} changed`);
+  }
+  const inputs = JSON.parse(readFileSync(resolve(tree, "release-inputs.json")));
+  assert.equal(inputs.agentbox_version, "0.0.0");
+  assert.equal(inputs.tools.claude.version, "2.1.273");
+  assert.equal(inputs.tools.codex.version, "0.155.0");
+  assert.equal(JSON.parse(readFileSync(resolve(tree, "package.json"))).version, "0.0.0");
   const lock = JSON.parse(readFileSync(resolve(tree, "package-lock.json")));
-  assert.equal(lock.version, after);
-  assert.equal(lock.packages[""].version, after);
+  assert.equal(lock.version, "0.0.0");
+  assert.equal(lock.packages[""].version, "0.0.0");
 
   if (process.env.AGENTBOX_SKIP_NESTED_GATE !== "1") {
     expectExit(run("git", ["init", "-q"], { cwd: tree }), 0, "fixture git init");
@@ -256,5 +259,70 @@ esac
     assert.match(gate.stdout + gate.stderr, /ℹ tests \d+/);
     assert.match(gate.stdout, /npm run lint/);
     assert.match(gate.stdout, /npm run format:check/);
+  }
+});
+
+test("updater fails closed on vendor downgrades and same-version record drift", async (t) => {
+  for (const fixture of [
+    {
+      label: "downgrade",
+      claude: "2.1.271",
+      codex: "0.153.0",
+      error: /channel moved backwards/,
+    },
+    {
+      label: "same-version drift",
+      error: /metadata changed without a version change/,
+    },
+  ]) {
+    await t.test(fixture.label, (t) => {
+      const dir = tempDir(t);
+      const tree = resolve(dir, "tree");
+      cpSync(ROOT, tree, {
+        recursive: true,
+        filter: (source) =>
+          ![".git", ".audit", "dist", "node_modules"].includes(source.split("/").at(-1)),
+      });
+      const stored = JSON.parse(readFileSync(resolve(tree, "release-inputs.json")));
+      const claudeVersion = fixture.claude ?? stored.tools.claude.version;
+      const codexVersion = fixture.codex ?? stored.tools.codex.version;
+      const storedClaudeSha = stored.tools.claude.platforms[0].sha256;
+      const driftSha = storedClaudeSha === "1".repeat(64) ? "4".repeat(64) : "1".repeat(64);
+      const fakeBin = resolve(dir, "bin");
+      mkdirSync(fakeBin);
+      writeExecutable(
+        resolve(fakeBin, "curl"),
+        `#!/bin/bash
+url="\${!#}"
+case " $* " in
+  *" --head "*)
+    case "$url" in *claude*) size=101 ;; *) size=202 ;; esac
+    printf 'HTTP/2 200\\r\\ncontent-length: %s\\r\\n\\r\\n' "$size"
+    ;;
+  *)
+    case "$url" in
+      */claude-code-releases/latest) printf '${claudeVersion}\\n' ;;
+      */${claudeVersion}/manifest.json)
+        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"modsCommit":"","platforms":{"linux-arm64":{"binary":"claude","checksum":"${driftSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${driftSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
+        ;;
+      */codex/channels/latest)
+        printf '%s\\n' '{"assets":[{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-aarch64-unknown-linux-musl.tar.gz","digest":"sha256:${"2".repeat(64)}","name":"codex-package-aarch64-unknown-linux-musl.tar.gz"},{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-x86_64-unknown-linux-musl.tar.gz","digest":"sha256:${"2".repeat(64)}","name":"codex-package-x86_64-unknown-linux-musl.tar.gz"}],"tag_name":"rust-v${codexVersion}"}'
+        ;;
+      *) exit 22 ;;
+    esac
+    ;;
+esac
+`,
+      );
+      const inputPath = resolve(tree, "release-inputs.json");
+      const before = readFileSync(inputPath);
+      const result = run("bash", ["scripts/update-versions.sh", "--write"], {
+        cwd: tree,
+        env: { PATH: `${fakeBin}:${process.env.PATH}` },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, fixture.error);
+      assert.deepEqual(readFileSync(inputPath), before);
+    });
   }
 });

@@ -2,7 +2,7 @@ name: Vendor update
 
 on:
   schedule:
-    - cron: "23 10 * * 1"
+    - cron: "23 10 * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,10 +13,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
-    name: Resolve and propose exact vendor inputs
+  resolve:
+    name: Resolve exact vendor inputs without write credentials
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      base_sha: ${{ steps.changes.outputs.base_sha }}
+      payload_sha: ${{ steps.changes.outputs.payload_sha }}
+      present: ${{ steps.changes.outputs.present }}
     steps:
       - name: Check out protected main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,21 +33,303 @@ jobs:
       - name: Validate bot diff allowlist
         id: changes
         run: |
+          base_sha=$(git rev-parse HEAD)
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "base_sha=$base_sha" >>"$GITHUB_OUTPUT"
           mapfile -t changed < <(git diff --name-only)
           if ((${#changed[@]} == 0)); then
             echo 'present=false' >>"$GITHUB_OUTPUT"
+            echo 'payload_sha=' >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          expected=$'VERSION\npackage-lock.json\npackage.json\nrelease-inputs.json'
-          actual=$(printf '%s\n' "${changed[@]}" | LC_ALL=C sort)
-          if ((${#changed[@]} != 4)) || [[ "$actual" != "$expected" ]]; then
+          if ((${#changed[@]} != 1)) || [[ "${changed[0]}" != release-inputs.json ]]; then
             printf 'update bot produced a disallowed diff:\n%s\n' "${changed[*]}" >&2
             exit 1
           fi
           echo 'present=true' >>"$GITHUB_OUTPUT"
-          echo "version=$(jq -er .agentbox_version release-inputs.json)" >>"$GITHUB_OUTPUT"
-      - name: Mint scoped Agentbox App token
+          echo "payload_sha=$(sha256sum release-inputs.json | awk '{print $1}')" >>"$GITHUB_OUTPUT"
+      - name: Transfer the single reviewed payload
         if: steps.changes.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vendor-update-payload
+          path: release-inputs.json
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    name: Validate and propose vendor inputs with App identity
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out fresh protected main without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the resolved payload without executing it
+        if: needs.resolve.outputs.present == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: vendor-update-payload
+          path: ${{ runner.temp }}/vendor-update-payload
+      - name: Validate base, payload, schema, and exact allowed diff inline
+        env:
+          RESOLVED_BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          PAYLOAD_SHA: ${{ needs.resolve.outputs.payload_sha }}
+          PAYLOAD_PRESENT: ${{ needs.resolve.outputs.present }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$RESOLVED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current_main=$(git rev-parse HEAD)
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$current_main"
+          git merge-base --is-ancestor "$RESOLVED_BASE_SHA" "$current_main"
+          test -f release-inputs.json
+          test ! -L release-inputs.json
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+          if [[ "$PAYLOAD_PRESENT" == false ]]; then
+            test -z "$PAYLOAD_SHA"
+            payload=release-inputs.json
+          else
+            test "$PAYLOAD_PRESENT" = true
+            [[ "$PAYLOAD_SHA" =~ ^[0-9a-f]{64}$ ]]
+            payload="$RUNNER_TEMP/vendor-update-payload/release-inputs.json"
+            test -f "$payload"
+            test ! -L "$payload"
+            test "$(find "$RUNNER_TEMP/vendor-update-payload" -mindepth 1 -maxdepth 1 -print)" = "$payload"
+            test "$(sha256sum "$payload" | awk '{print $1}')" = "$PAYLOAD_SHA"
+            test "$(wc -c <"$payload")" -le 65536
+          fi
+
+          curl_text() {
+            curl --fail --silent --show-error \
+              --proto '=https' --tlsv1.2 --max-time 60 --retry 3 "$1"
+          }
+          head_size() {
+            local value
+            value=$(
+              curl --fail --silent --show-error --head \
+                --proto '=https' --tlsv1.2 --max-time 60 --retry 3 "$1" |
+                awk 'BEGIN { IGNORECASE=1 } /^content-length:/ { gsub("\\r", "", $2); n=$2 } END { print n }'
+            )
+            [[ "$value" =~ ^[1-9][0-9]*$ ]]
+            ((value <= 512 * 1024 * 1024))
+            printf '%s\n' "$value"
+          }
+
+          claude_version=$(curl_text https://downloads.claude.ai/claude-code-releases/latest)
+          [[ "$claude_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          claude_manifest=$(curl_text "https://downloads.claude.ai/claude-code-releases/$claude_version/manifest.json")
+          jq -e --arg version "$claude_version" '
+            (keys == ["buildDate", "commit", "manifestSignatureEnforcement", "modsCommit", "platforms", "sdkCompat", "version"]) and
+            .version == $version and
+            (.platforms["linux-arm64"] | keys == ["binary", "checksum", "size"]) and
+            (.platforms["linux-x64"] | keys == ["binary", "checksum", "size"]) and
+            .platforms["linux-arm64"].binary == "claude" and
+            .platforms["linux-x64"].binary == "claude"
+          ' <<<"$claude_manifest" >/dev/null
+          claude_arm_url="https://downloads.claude.ai/claude-code-releases/$claude_version/linux-arm64/claude"
+          claude_amd_url="https://downloads.claude.ai/claude-code-releases/$claude_version/linux-x64/claude"
+          claude_arm_sha=$(jq -er '.platforms["linux-arm64"].checksum | select(test("^[0-9a-f]{64}$"))' <<<"$claude_manifest")
+          claude_amd_sha=$(jq -er '.platforms["linux-x64"].checksum | select(test("^[0-9a-f]{64}$"))' <<<"$claude_manifest")
+          claude_arm_size=$(jq -er '.platforms["linux-arm64"].size | select(type == "number")' <<<"$claude_manifest")
+          claude_amd_size=$(jq -er '.platforms["linux-x64"].size | select(type == "number")' <<<"$claude_manifest")
+          test "$(head_size "$claude_arm_url")" = "$claude_arm_size"
+          test "$(head_size "$claude_amd_url")" = "$claude_amd_size"
+
+          codex_feed=$(curl_text https://releases.openai.com/codex/channels/latest)
+          jq -e 'keys == ["assets", "tag_name"] and (.assets | type == "array")' <<<"$codex_feed" >/dev/null
+          codex_tag=$(jq -er '.tag_name | select(type == "string")' <<<"$codex_feed")
+          [[ "$codex_tag" =~ ^rust-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]
+          codex_version=${BASH_REMATCH[1]}
+          codex_asset() {
+            local name=$1 field=$2
+            jq -er --arg name "$name" --arg field "$field" '
+              [.assets[] | select(.name == $name)] as $matches |
+              if ($matches | length) == 1 and ($matches[0] | keys) == ["browser_download_url", "digest", "name"]
+              then $matches[0][$field] else error("asset must be unique and schema-exact") end
+            ' <<<"$codex_feed"
+          }
+          codex_arm_name=codex-package-aarch64-unknown-linux-musl.tar.gz
+          codex_amd_name=codex-package-x86_64-unknown-linux-musl.tar.gz
+          codex_arm_url="https://releases.openai.com/codex/releases/$codex_version/$codex_arm_name"
+          codex_amd_url="https://releases.openai.com/codex/releases/$codex_version/$codex_amd_name"
+          test "$(codex_asset "$codex_arm_name" browser_download_url)" = "$codex_arm_url"
+          test "$(codex_asset "$codex_amd_name" browser_download_url)" = "$codex_amd_url"
+          codex_arm_sha=$(codex_asset "$codex_arm_name" digest)
+          codex_amd_sha=$(codex_asset "$codex_amd_name" digest)
+          codex_arm_sha=${codex_arm_sha#sha256:}
+          codex_amd_sha=${codex_amd_sha#sha256:}
+          [[ "$codex_arm_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$codex_amd_sha" =~ ^[0-9a-f]{64}$ ]]
+          codex_arm_size=$(head_size "$codex_arm_url")
+          codex_amd_size=$(head_size "$codex_amd_url")
+
+          trusted_payload="$RUNNER_TEMP/trusted-release-inputs.json"
+          jq -S \
+            --arg claude_version "$claude_version" \
+            --arg claude_arm_url "$claude_arm_url" --arg claude_arm_sha "$claude_arm_sha" --argjson claude_arm_size "$claude_arm_size" \
+            --arg claude_amd_url "$claude_amd_url" --arg claude_amd_sha "$claude_amd_sha" --argjson claude_amd_size "$claude_amd_size" \
+            --arg codex_version "$codex_version" \
+            --arg codex_arm_url "$codex_arm_url" --arg codex_arm_sha "$codex_arm_sha" --argjson codex_arm_size "$codex_arm_size" \
+            --arg codex_amd_url "$codex_amd_url" --arg codex_amd_sha "$codex_amd_sha" --argjson codex_amd_size "$codex_amd_size" '
+              .tools.claude.version = $claude_version |
+              (.tools.claude.platforms[] | select(.platform == "linux/arm64")) |=
+                (.url = $claude_arm_url | .sha256 = $claude_arm_sha | .size = $claude_arm_size) |
+              (.tools.claude.platforms[] | select(.platform == "linux/amd64")) |=
+                (.url = $claude_amd_url | .sha256 = $claude_amd_sha | .size = $claude_amd_size) |
+              .tools.codex.version = $codex_version |
+              (.tools.codex.platforms[] | select(.platform == "linux/arm64")) |=
+                (.url = $codex_arm_url | .sha256 = $codex_arm_sha | .size = $codex_arm_size) |
+              (.tools.codex.platforms[] | select(.platform == "linux/amd64")) |=
+                (.url = $codex_amd_url | .sha256 = $codex_amd_sha | .size = $codex_amd_size)
+            ' release-inputs.json >"$trusted_payload"
+          if [[ "$PAYLOAD_PRESENT" == false ]]; then
+            jq -cS . release-inputs.json >"$RUNNER_TEMP/base-canonical.json"
+            jq -cS . "$trusted_payload" >"$RUNNER_TEMP/trusted-canonical.json"
+            cmp -s "$RUNNER_TEMP/base-canonical.json" "$RUNNER_TEMP/trusted-canonical.json"
+            exit 0
+          fi
+          cmp -s "$payload" "$trusted_payload"
+
+          python3 -I - release-inputs.json "$payload" <<'PY'
+          import copy
+          import json
+          import re
+          import sys
+
+          MAX_SIZE = 512 * 1024 * 1024
+          SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+          SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          def load(path):
+              with open(path, encoding="utf-8") as source:
+                  return json.load(source, object_pairs_hook=unique)
+
+          def exact_keys(value, expected, label):
+              if type(value) is not dict or set(value) != set(expected):
+                  raise ValueError(f"unexpected {label} schema")
+
+          def stable_version(value, label):
+              if type(value) is not str or not SEMVER.fullmatch(value):
+                  raise ValueError(f"invalid {label} version")
+              return tuple(int(part) for part in value.split("."))
+
+          def validate_platform(record, vendor, version):
+              common = {"platform", "url", "sha256", "size"}
+              expected = common if vendor == "claude" else common | {"target"}
+              exact_keys(record, expected, f"{vendor} platform")
+              platform = record["platform"]
+              if platform not in {"linux/arm64", "linux/amd64"}:
+                  raise ValueError(f"unexpected {vendor} platform")
+              if type(record["sha256"]) is not str or not SHA256.fullmatch(record["sha256"]):
+                  raise ValueError(f"invalid {vendor} checksum")
+              if type(record["size"]) is not int or not 0 < record["size"] <= MAX_SIZE:
+                  raise ValueError(f"invalid {vendor} size")
+              if vendor == "claude":
+                  suffix = "linux-arm64/claude" if platform == "linux/arm64" else "linux-x64/claude"
+                  expected_url = f"https://downloads.claude.ai/claude-code-releases/{version}/{suffix}"
+              else:
+                  target = "aarch64-unknown-linux-musl" if platform == "linux/arm64" else "x86_64-unknown-linux-musl"
+                  if record["target"] != target:
+                      raise ValueError("unexpected Codex target")
+                  expected_url = f"https://releases.openai.com/codex/releases/{version}/codex-package-{target}.tar.gz"
+              if record["url"] != expected_url:
+                  raise ValueError(f"unexpected {vendor} URL")
+
+          def validate(document):
+              exact_keys(document, {"schema_version", "agentbox_version", "runtime_protocol_version", "runtime", "tools", "managed_files"}, "top-level")
+              if document["schema_version"] != 1 or document["runtime_protocol_version"] != 1:
+                  raise ValueError("unexpected release input protocol")
+              if document["agentbox_version"] != "0.0.0":
+                  raise ValueError("Agentbox source sentinel changed")
+              exact_keys(document["runtime"], {"image_repository"}, "runtime")
+              if document["runtime"]["image_repository"] != "ghcr.io/zurfyx/agentbox-runtime":
+                  raise ValueError("unexpected runtime repository")
+              exact_keys(document["managed_files"], {"runtime_instructions", "statusline"}, "managed files")
+              expected_paths = {
+                  "runtime_instructions": "/usr/local/share/agentbox/instructions.md",
+                  "statusline": "/usr/local/share/agentbox/statusline.sh",
+              }
+              for name, expected_path in expected_paths.items():
+                  record = document["managed_files"][name]
+                  exact_keys(record, {"path", "sha256"}, f"managed file {name}")
+                  if record["path"] != expected_path or type(record["sha256"]) is not str or not SHA256.fullmatch(record["sha256"]):
+                      raise ValueError(f"invalid managed file {name}")
+              exact_keys(document["tools"], {"claude", "codex"}, "tools")
+              claude = document["tools"]["claude"]
+              codex = document["tools"]["codex"]
+              exact_keys(claude, {"version", "kind", "platforms"}, "Claude")
+              exact_keys(codex, {"version", "kind", "layout_version", "entrypoint", "allowed_members", "platforms"}, "Codex")
+              if claude["kind"] != "raw-executable":
+                  raise ValueError("unexpected Claude kind")
+              if codex["kind"] != "tar.gz-package" or codex["layout_version"] != 1 or codex["entrypoint"] != "bin/codex":
+                  raise ValueError("unexpected Codex layout")
+              expected_members = [
+                  "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
+                  "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
+                  "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
+              ]
+              if codex["allowed_members"] != expected_members:
+                  raise ValueError("unexpected Codex member allowlist")
+              for vendor, record in (("claude", claude), ("codex", codex)):
+                  stable_version(record["version"], vendor)
+                  if type(record["platforms"]) is not list or len(record["platforms"]) != 2:
+                      raise ValueError(f"unexpected {vendor} platforms")
+                  for platform in record["platforms"]:
+                      validate_platform(platform, vendor, record["version"])
+                  if {platform["platform"] for platform in record["platforms"]} != {"linux/arm64", "linux/amd64"}:
+                      raise ValueError(f"duplicate {vendor} platform")
+
+          def without_mutable_vendor_fields(document):
+              result = copy.deepcopy(document)
+              for vendor in ("claude", "codex"):
+                  del result["tools"][vendor]["version"]
+                  for platform in result["tools"][vendor]["platforms"]:
+                      for field in ("url", "sha256", "size"):
+                          del platform[field]
+              return result
+
+          base = load(sys.argv[1])
+          candidate = load(sys.argv[2])
+          validate(base)
+          validate(candidate)
+          if without_mutable_vendor_fields(base) != without_mutable_vendor_fields(candidate):
+              raise ValueError("payload changes fields outside the vendor update allowlist")
+
+          advanced = False
+          for vendor in ("claude", "codex"):
+              before = base["tools"][vendor]
+              after = candidate["tools"][vendor]
+              order = (stable_version(after["version"], vendor) > stable_version(before["version"], vendor)) - (stable_version(after["version"], vendor) < stable_version(before["version"], vendor))
+              if order < 0:
+                  raise ValueError(f"{vendor} version moved backwards")
+              if order == 0 and before != after:
+                  raise ValueError(f"{vendor} metadata drifted without a version change")
+              advanced = advanced or order > 0
+          if not advanced:
+              raise ValueError("payload does not advance a vendor version")
+          PY
+
+          canonical="$RUNNER_TEMP/vendor-update-payload/canonical.json"
+          jq -S . "$payload" >"$canonical"
+          cmp -s "$payload" "$canonical"
+          cp "$payload" release-inputs.json
+          test "$(git diff --name-only --no-ext-diff)" = release-inputs.json
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ' M release-inputs.json'
+      - name: Mint scoped Agentbox App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -53,26 +339,51 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
+      - name: Close a stale owned proposal after main catches up
+        if: needs.resolve.outputs.present == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          branch=automation/vendor-update
+          expected_author="$APP_SLUG[bot]"
+          existing=$(gh pr list --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+            --json author,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,number)
+          count=$(jq 'length' <<<"$existing")
+          ((count <= 1)) || { echo "multiple open update PRs use $branch" >&2; exit 1; }
+          if ((count == 0)); then
+            exit 0
+          fi
+          jq -e --arg author "$expected_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
+            .[0].author.login == $author and .[0].baseRefName == "main" and
+            .[0].headRefName == $branch and .[0].headRepositoryOwner.login == $owner and
+            .[0].isCrossRepository == false
+          ' <<<"$existing" >/dev/null || {
+            echo "refusing to close a proposal not owned by the configured App" >&2
+            exit 1
+          }
+          pr=$(jq -r '.[0].number' <<<"$existing")
+          gh pr close "$pr" --delete-branch \
+            --comment "Closing this App-owned proposal because protected main already contains the current vendor inputs."
       - name: Commit and push the allowlisted proposal
-        if: steps.changes.outputs.present == 'true'
+        if: needs.resolve.outputs.present == 'true'
         id: proposal
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          VERSION: ${{ steps.changes.outputs.version }}
         run: |
-          branch="automation/vendor-update-v$VERSION"
+          branch=automation/vendor-update
           [[ "$APP_SLUG" =~ ^[A-Za-z0-9_-]+$ ]]
           expected_author="$APP_SLUG[bot]"
           expected_email="$APP_SLUG[bot]@users.noreply.github.com"
-          expected_message="Update pinned vendor versions for v$VERSION"
+          expected_message="Update pinned vendor versions"
           git config user.name "$expected_author"
           git config user.email "$expected_email"
           git switch -c "$branch"
-          git add -- VERSION package.json package-lock.json release-inputs.json
+          git add -- release-inputs.json
           staged=$(git diff --cached --name-only | LC_ALL=C sort)
-          test "$staged" = $'VERSION\npackage-lock.json\npackage.json\nrelease-inputs.json'
-          git commit -m "$expected_message"
+          test "$staged" = release-inputs.json
+          git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -m "$expected_message"
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           existing=$(gh pr list --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
             --json author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,number)
@@ -116,17 +427,17 @@ jobs:
             fi
             gh pr create \
               --base main --head "$branch" \
-              --title "Update pinned vendor versions for v$VERSION" \
-              --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly VERSION, release-inputs.json, package.json, and package-lock.json." >/dev/null
+              --title "Update pinned vendor versions" \
+              --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly release-inputs.json; Agentbox release versions are allocated only by publication." >/dev/null
             pr=$(gh pr view "$branch" --json number --jq .number)
           fi
           gh pr edit "$pr" \
-            --title "Update pinned vendor versions for v$VERSION" \
-            --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly VERSION, release-inputs.json, package.json, and package-lock.json."
+            --title "Update pinned vendor versions" \
+            --body "Automated exact-version proposal. The downloaded Linux artifacts were size/hash verified; Codex package membership and metadata were safely inspected without extraction or execution. The allowlisted diff is exactly release-inputs.json; Agentbox release versions are allocated only by publication."
           [[ "$pr" =~ ^[0-9]+$ ]]
           echo "number=$pr" >>"$GITHUB_OUTPUT"
-      - name: Enable auto-merge only behind aggregate CI
-        if: steps.changes.outputs.present == 'true'
+      - name: Merge only behind aggregate CI
+        if: needs.resolve.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR: ${{ steps.proposal.outputs.number }}

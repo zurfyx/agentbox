@@ -3,7 +3,7 @@
 # /opt/agentbox/vendor; no vendor executable is copied into an image layer.
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
-ARG AGENTBOX_VERSION=0.1.0
+ARG AGENTBOX_VERSION=0.0.0
 ARG SOURCE_COMMIT=unknown
 ARG RUNTIME_PROTOCOL=1
 ARG INSTRUCTIONS_SHA256=0ff973bdd17e72a441e5880a112299ec0e566708862a8b5eae6c68d7e53a0478

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 input=release-inputs.json
 output_dir=dist
+source_root=
 version=
 source_commit=
 index_digest=
@@ -13,16 +14,20 @@ dry_run=false
 
 usage() {
   cat << 'EOF'
-Usage: scripts/release.sh [--dry-run] [--input PATH] [--output-dir DIR]
+Usage: scripts/release.sh [--dry-run] [--source-root DIR]
+                          [--input PATH] [--output-dir DIR]
                           [--version X.Y.Z] [--source-commit 40HEX]
                           [--index-digest sha256:HEX]
                           [--amd64-digest sha256:HEX]
                           [--arm64-digest sha256:HEX]
 
-Render the final exact-digest manifest and deterministic Homebrew archive.
-In --dry-run mode omitted identities are filled with obvious non-publishable
-sentinels and no output directory is created. Publication must pass every
-identity explicitly.
+Render a derived version into the final exact-digest manifest and deterministic
+Homebrew archive without modifying the source templates. --version is always
+required and must not be the 0.0.0 source sentinel. In --dry-run mode omitted
+digests are filled with obvious non-publishable sentinels and no output
+directory is created. Publication must pass every identity explicitly. A
+trusted tooling checkout may render an exact selected-source tree by passing
+--source-root; the selected source remains the provenance identity.
 EOF
 }
 
@@ -42,9 +47,10 @@ sha256_file() {
 while (($#)); do
   case "$1" in
     --dry-run) dry_run=true ;;
-    --input | --output-dir | --version | --source-commit | --index-digest | --amd64-digest | --arm64-digest)
+    --source-root | --input | --output-dir | --version | --source-commit | --index-digest | --amd64-digest | --arm64-digest)
       (($# >= 2)) || die "$1 requires a value"
       case "$1" in
+        --source-root) source_root=$2 ;;
         --input) input=$2 ;;
         --output-dir) output_dir=$2 ;;
         --version) version=$2 ;;
@@ -67,19 +73,31 @@ done
 ((BASH_VERSINFO[0] >= 5)) || die "Bash 5 or newer is required"
 command -v git > /dev/null || die "git is required"
 command -v jq > /dev/null || die "jq is required"
+script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+tooling_root=$(cd -P -- "$script_dir/.." && pwd)
+source_root=${source_root:-$tooling_root}
+[[ -d $source_root ]] || die "source root is not a directory: $source_root"
+source_root=$(cd -P -- "$source_root" && pwd)
+if [[ $input != /* ]]; then
+  input="$source_root/$input"
+fi
 [[ -f $input ]] || die "missing release inputs: $input"
+[[ -f $tooling_root/libexec/state.py ]] || die "trusted manifest validator is missing"
 
+source_version=0.0.0
 input_version=$(jq -er '.agentbox_version | select(type == "string")' "$input")
-version=${version:-$input_version}
-source_commit=${source_commit:-$(git rev-parse HEAD)}
+[[ -n $version ]] || die "--version is required"
+source_commit=${source_commit:-$(git -C "$source_root" rev-parse HEAD)}
 if [[ $dry_run == true ]]; then
   index_digest=${index_digest:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
   amd64_digest=${amd64_digest:-sha256:1111111111111111111111111111111111111111111111111111111111111111}
   arm64_digest=${arm64_digest:-sha256:2222222222222222222222222222222222222222222222222222222222222222}
 fi
 
-[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be X.Y.Z"
-[[ $version == "$input_version" ]] || die "version does not equal release-inputs.json"
+[[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
+  die "version must be canonical X.Y.Z"
+[[ $version != "$source_version" ]] || die "version must not be the 0.0.0 source sentinel"
+[[ $input_version == "$source_version" ]] || die "release-inputs.json must contain the 0.0.0 source sentinel"
 [[ $source_commit =~ ^[0-9a-f]{40}$ ]] || die "source commit must be 40 lowercase hex characters"
 for digest in "$index_digest" "$amd64_digest" "$arm64_digest"; do
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "all OCI digests must be exact sha256 digests"
@@ -102,6 +120,8 @@ jq -e '
 
 required_files=(
   VERSION
+  Dockerfile
+  Formula/agentbox.rb
   bin/agentbox
   libexec/host.sh
   libexec/state.py
@@ -114,27 +134,42 @@ required_files=(
   THIRD_PARTY_NOTICES.md
 )
 for path in "${required_files[@]}"; do
-  [[ -f $path ]] || die "required package file is missing: $path"
+  [[ -f $source_root/$path ]] || die "required source file is missing: $path"
 done
-root_version=$(< VERSION)
+root_version=$(< "$source_root/VERSION")
 [[ $root_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION is invalid"
-cmp -s VERSION <(printf '%s\n' "$root_version") || die "VERSION must be one canonical line"
-[[ $root_version == "$version" ]] || die "VERSION does not equal the requested release version"
-[[ "$(jq -er .version package.json)" == "$version" ]] || die "package.json version does not match VERSION"
-[[ "$(jq -er .version package-lock.json)" == "$version" ]] || die "package-lock.json version does not match VERSION"
-[[ "$(jq -er '.packages[""].version' package-lock.json)" == "$version" ]] ||
-  die "package-lock root package version does not match VERSION"
-[[ "$(sha256_file runtime/instructions.md)" == "$(jq -er .managed_files.runtime_instructions.sha256 "$input")" ]] ||
+cmp -s "$source_root/VERSION" <(printf '%s\n' "$root_version") || die "VERSION must be one canonical line"
+[[ $root_version == "$source_version" ]] || die "VERSION must contain the 0.0.0 source sentinel"
+[[ "$(jq -er .version "$source_root/package.json")" == "$source_version" ]] ||
+  die "package.json must contain the 0.0.0 source sentinel"
+[[ "$(jq -er .version "$source_root/package-lock.json")" == "$source_version" ]] ||
+  die "package-lock.json must contain the 0.0.0 source sentinel"
+[[ "$(jq -er '.packages[""].version' "$source_root/package-lock.json")" == "$source_version" ]] ||
+  die "package-lock root package must contain the 0.0.0 source sentinel"
+[[ "$(grep -Ec '^ARG AGENTBOX_VERSION=' "$source_root/Dockerfile")" == 1 ]] &&
+  [[ "$(grep -Fxc 'ARG AGENTBOX_VERSION=0.0.0' "$source_root/Dockerfile")" == 1 ]] ||
+  die "Dockerfile must contain exactly the canonical Agentbox version sentinel"
+formula_url='  url "https://github.com/zurfyx/agentbox/releases/download/v0.0.0/agentbox-0.0.0.tar.gz"'
+formula_version='  version "0.0.0"'
+formula_sha='  sha256 "0000000000000000000000000000000000000000000000000000000000000000"'
+[[ "$(grep -Ec '^  url .*agentbox/releases/download/' "$source_root/Formula/agentbox.rb")" == 1 ]] &&
+  [[ "$(grep -Fxc "$formula_url" "$source_root/Formula/agentbox.rb")" == 1 ]] &&
+  [[ "$(grep -Ec '^  version ' "$source_root/Formula/agentbox.rb")" == 1 ]] &&
+  [[ "$(grep -Fxc "$formula_version" "$source_root/Formula/agentbox.rb")" == 1 ]] &&
+  [[ "$(grep -Ec '^  sha256 ' "$source_root/Formula/agentbox.rb")" == 1 ]] &&
+  [[ "$(grep -Fxc "$formula_sha" "$source_root/Formula/agentbox.rb")" == 1 ]] ||
+  die "Formula/agentbox.rb must contain exactly the canonical release identity sentinels"
+[[ "$(sha256_file "$source_root/runtime/instructions.md")" == "$(jq -er .managed_files.runtime_instructions.sha256 "$input")" ]] ||
   die "runtime instructions do not match the reviewed release inputs"
-[[ "$(sha256_file runtime/statusline.sh)" == "$(jq -er .managed_files.statusline.sha256 "$input")" ]] ||
+[[ "$(sha256_file "$source_root/runtime/statusline.sh")" == "$(jq -er .managed_files.statusline.sha256 "$input")" ]] ||
   die "runtime status line does not match the reviewed release inputs"
 
 if [[ $dry_run == false ]]; then
   [[ -n $index_digest && -n $amd64_digest && -n $arm64_digest ]] ||
     die "publication requires the index and both child digests"
-  [[ "$(git rev-parse HEAD)" == "$source_commit" ]] || die "source commit is not checked out"
-  git diff --quiet --ignore-submodules -- || die "tracked worktree changes are not releasable"
-  git diff --cached --quiet --ignore-submodules -- || die "staged changes are not releasable"
+  [[ "$(git -C "$source_root" rev-parse HEAD)" == "$source_commit" ]] || die "source commit is not checked out"
+  git -C "$source_root" diff --quiet --ignore-submodules -- || die "tracked source changes are not releasable"
+  git -C "$source_root" diff --cached --quiet --ignore-submodules -- || die "staged source changes are not releasable"
 fi
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/agentbox-release.XXXXXX")
@@ -142,28 +177,30 @@ trap 'rm -rf -- "$tmp_dir"' EXIT
 root="$tmp_dir/agentbox-$version"
 mkdir -p "$root/bin" "$root/libexec" "$root/completions" "$root/share/agentbox"
 
-install -m 0444 VERSION "$root/VERSION"
-install -m 0555 bin/agentbox "$root/bin/agentbox"
-install -m 0555 libexec/host.sh "$root/libexec/host.sh"
-install -m 0555 libexec/state.py "$root/libexec/state.py"
-install -m 0444 completions/agentbox.bash "$root/completions/agentbox.bash"
-install -m 0444 completions/_agentbox "$root/completions/_agentbox"
-install -m 0444 completions/agentbox.fish "$root/completions/agentbox.fish"
-install -m 0555 setup-host-bridge.sh "$root/setup-host-bridge.sh"
-install -m 0444 README.md "$root/README.md"
-install -m 0444 LICENSE "$root/LICENSE"
-install -m 0444 THIRD_PARTY_NOTICES.md "$root/THIRD_PARTY_NOTICES.md"
-install -m 0444 VERSION "$root/share/agentbox/VERSION"
-install -m 0444 README.md "$root/share/agentbox/README.md"
-install -m 0444 THIRD_PARTY_NOTICES.md "$root/share/agentbox/THIRD_PARTY_NOTICES.md"
+printf '%s\n' "$version" > "$root/VERSION"
+chmod 0444 "$root/VERSION"
+install -m 0555 "$source_root/bin/agentbox" "$root/bin/agentbox"
+install -m 0555 "$source_root/libexec/host.sh" "$root/libexec/host.sh"
+install -m 0555 "$source_root/libexec/state.py" "$root/libexec/state.py"
+install -m 0444 "$source_root/completions/agentbox.bash" "$root/completions/agentbox.bash"
+install -m 0444 "$source_root/completions/_agentbox" "$root/completions/_agentbox"
+install -m 0444 "$source_root/completions/agentbox.fish" "$root/completions/agentbox.fish"
+install -m 0555 "$source_root/setup-host-bridge.sh" "$root/setup-host-bridge.sh"
+install -m 0444 "$source_root/README.md" "$root/README.md"
+install -m 0444 "$source_root/LICENSE" "$root/LICENSE"
+install -m 0444 "$source_root/THIRD_PARTY_NOTICES.md" "$root/THIRD_PARTY_NOTICES.md"
+printf '%s\n' "$version" > "$root/share/agentbox/VERSION"
+chmod 0444 "$root/share/agentbox/VERSION"
+install -m 0444 "$source_root/README.md" "$root/share/agentbox/README.md"
+install -m 0444 "$source_root/THIRD_PARTY_NOTICES.md" "$root/share/agentbox/THIRD_PARTY_NOTICES.md"
 
-jq -cS --arg image "$repository@$index_digest" '
-  del(.runtime) + {runtime: {image: $image}}
+jq -cS --arg version "$version" --arg image "$repository@$index_digest" '
+  .agentbox_version = $version | del(.runtime) + {runtime: {image: $image}}
 ' "$input" > "$root/share/agentbox/release-manifest.json"
 chmod 0444 "$root/share/agentbox/release-manifest.json"
 
 # The host validator is the release manifest contract authority.
-python3 libexec/state.py --expected-version "$version" validate-manifest "$root/share/agentbox/release-manifest.json" > /dev/null
+python3 "$tooling_root/libexec/state.py" --expected-version "$version" validate-manifest "$root/share/agentbox/release-manifest.json" > /dev/null
 
 asset="agentbox-$version.tar.gz"
 if [[ $dry_run == true ]]; then
@@ -177,7 +214,7 @@ mkdir -p "$output_dir"
 [[ ! -e "$output_dir/$asset.sha256" ]] || die "refusing to replace $output_dir/$asset.sha256"
 [[ ! -e "$output_dir/agentbox-$version.provenance.json" ]] || die "refusing to replace provenance"
 
-epoch=$(git show -s --format=%ct "$source_commit")
+epoch=$(git -C "$source_root" show -s --format=%ct "$source_commit")
 tar --version | grep -F 'GNU tar' > /dev/null || die "deterministic publication requires GNU tar"
 tar --sort=name --format=ustar --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
   -C "$tmp_dir" -czf "$output_dir/$asset" "agentbox-$version"
