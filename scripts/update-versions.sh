@@ -7,11 +7,12 @@ readonly CLAUDE_RELEASE_ROOT="https://downloads.claude.ai/claude-code-releases"
 readonly CODEX_LATEST_URL="https://releases.openai.com/codex/channels/latest"
 readonly CODEX_RELEASE_ROOT="https://releases.openai.com/codex/releases"
 readonly MAX_ARTIFACT_SIZE=$((512 * 1024 * 1024))
+readonly SOURCE_VERSION_SENTINEL="0.0.0"
+readonly STABLE_SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
 mode=dry-run
 verify_downloads=false
 input=release-inputs.json
-version_file=VERSION
 
 usage() {
   cat << 'EOF'
@@ -53,22 +54,20 @@ command -v curl > /dev/null || die "curl is required"
 command -v jq > /dev/null || die "jq is required"
 command -v python3 > /dev/null || die "Python 3 is required"
 [[ -f $input ]] || die "missing reviewed input file: $input"
-[[ -f $version_file ]] || die "missing parent version file: $version_file"
+[[ -f VERSION ]] || die "missing source VERSION template"
 script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly CODEX_INSPECTOR="$script_dir/inspect-codex-package.py"
 [[ -x $CODEX_INSPECTOR ]] || die "Codex package inspector is missing or not executable"
-current_version=$(< "$version_file")
-[[ $current_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-  die "VERSION must contain a stable semantic version"
-cmp -s "$version_file" <(printf '%s\n' "$current_version") || die "VERSION must be one canonical line"
-[[ "$(jq -er '.agentbox_version | select(type == "string")' "$input")" == "$current_version" ]] ||
-  die "VERSION and release-inputs.json disagree"
-[[ "$(jq -er '.version | select(type == "string")' package.json)" == "$current_version" ]] ||
-  die "VERSION and package.json disagree"
-[[ "$(jq -er '.version | select(type == "string")' package-lock.json)" == "$current_version" ]] ||
-  die "VERSION and package-lock.json disagree"
-[[ "$(jq -er '.packages[""].version | select(type == "string")' package-lock.json)" == "$current_version" ]] ||
-  die "VERSION and package-lock root package disagree"
+cmp -s VERSION <(printf '%s\n' "$SOURCE_VERSION_SENTINEL") ||
+  die "VERSION must contain the canonical source sentinel $SOURCE_VERSION_SENTINEL"
+[[ "$(jq -er '.agentbox_version | select(type == "string")' "$input")" == "$SOURCE_VERSION_SENTINEL" ]] ||
+  die "release-inputs.json must retain the source version sentinel"
+[[ "$(jq -er '.version | select(type == "string")' package.json)" == "$SOURCE_VERSION_SENTINEL" ]] ||
+  die "package.json must retain the source version sentinel"
+[[ "$(jq -er '.version | select(type == "string")' package-lock.json)" == "$SOURCE_VERSION_SENTINEL" ]] ||
+  die "package-lock.json must retain the source version sentinel"
+[[ "$(jq -er '.packages[""].version | select(type == "string")' package-lock.json)" == "$SOURCE_VERSION_SENTINEL" ]] ||
+  die "package-lock root package must retain the source version sentinel"
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/agentbox-update.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT
@@ -92,7 +91,7 @@ jq -cS '
   .runtime.image_repository as $repository |
   del(.runtime) + {runtime: {image: ($repository + "@sha256:0000000000000000000000000000000000000000000000000000000000000000")}}
 ' "$input" > "$tmp_dir/input-manifest.json"
-python3 libexec/state.py --expected-version "$current_version" validate-manifest "$tmp_dir/input-manifest.json" > /dev/null ||
+python3 libexec/state.py --expected-version "$SOURCE_VERSION_SENTINEL" validate-manifest "$tmp_dir/input-manifest.json" > /dev/null ||
   die "release inputs do not satisfy the strict manifest contract"
 
 curl_text() {
@@ -140,7 +139,7 @@ verify_artifact() {
 }
 
 claude_version=$(curl_text "$CLAUDE_LATEST_URL")
-[[ $claude_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+[[ $claude_version =~ $STABLE_SEMVER_RE ]] ||
   die "Claude latest channel did not return a stable semantic version"
 claude_manifest=$(curl_text "$CLAUDE_RELEASE_ROOT/$claude_version/manifest.json")
 jq -e --arg version "$claude_version" '
@@ -179,7 +178,7 @@ codex_feed=$(curl_text "$CODEX_LATEST_URL")
 jq -e 'keys == ["assets", "tag_name"] and (.assets | type == "array")' <<< "$codex_feed" > /dev/null ||
   die "Codex latest channel schema changed"
 codex_tag=$(jq -er '.tag_name | select(type == "string")' <<< "$codex_feed")
-[[ $codex_tag =~ ^rust-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
+[[ $codex_tag =~ ^rust-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] ||
   die "Codex latest channel did not return an expected stable tag"
 codex_version=${BASH_REMATCH[1]}
 
@@ -226,23 +225,16 @@ fi
 
 old_claude=$(jq -er '.tools.claude.version' "$input")
 old_codex=$(jq -er '.tools.codex.version' "$input")
-if [[ $old_claude == "$claude_version" && $old_codex == "$codex_version" ]]; then
-  printf 'Vendor inputs already current (Claude %s, Codex %s).\n' "$claude_version" "$codex_version"
-  exit 0
-fi
-
-IFS=. read -r version_major version_minor version_patch <<< "$current_version"
-next_version="$version_major.$version_minor.$((10#$version_patch + 1))"
+[[ $old_claude =~ $STABLE_SEMVER_RE ]] || die "stored Claude version is not stable SemVer"
+[[ $old_codex =~ $STABLE_SEMVER_RE ]] || die "stored Codex version is not stable SemVer"
 
 jq -S \
-  --arg agentbox_version "$next_version" \
   --arg claude_version "$claude_version" \
   --arg claude_arm_url "$claude_arm_url" --arg claude_arm_sha "$claude_arm_sha" --argjson claude_arm_size "$claude_arm_size" \
   --arg claude_amd_url "$claude_amd_url" --arg claude_amd_sha "$claude_amd_sha" --argjson claude_amd_size "$claude_amd_size" \
   --arg codex_version "$codex_version" \
   --arg codex_arm_url "$codex_arm_url" --arg codex_arm_sha "$codex_arm_sha" --argjson codex_arm_size "$codex_arm_size" \
   --arg codex_amd_url "$codex_amd_url" --arg codex_amd_sha "$codex_amd_sha" --argjson codex_amd_size "$codex_amd_size" '
-    .agentbox_version = $agentbox_version |
     .tools.claude.version = $claude_version |
     (.tools.claude.platforms[] | select(.platform == "linux/arm64")) |=
       (.url = $claude_arm_url | .sha256 = $claude_arm_sha | .size = $claude_arm_size) |
@@ -254,31 +246,52 @@ jq -S \
     (.tools.codex.platforms[] | select(.platform == "linux/amd64")) |=
       (.url = $codex_amd_url | .sha256 = $codex_amd_sha | .size = $codex_amd_size)
   ' "$input" > "$tmp_dir/release-inputs.json"
-printf '%s\n' "$next_version" > "$tmp_dir/VERSION"
-jq -S --arg version "$next_version" '.version = $version' package.json > "$tmp_dir/package.json"
-jq -S --arg version "$next_version" '.version = $version | .packages[""].version = $version' \
-  package-lock.json > "$tmp_dir/package-lock.json"
+
+semver_compare() {
+  python3 - "$1" "$2" << 'PY'
+import sys
+
+left = tuple(int(part) for part in sys.argv[1].split("."))
+right = tuple(int(part) for part in sys.argv[2].split("."))
+print((left > right) - (left < right))
+PY
+}
+
+claude_order=$(semver_compare "$claude_version" "$old_claude")
+codex_order=$(semver_compare "$codex_version" "$old_codex")
+((claude_order >= 0)) || die "Claude channel moved backwards: $old_claude -> $claude_version"
+((codex_order >= 0)) || die "Codex channel moved backwards: $old_codex -> $codex_version"
+
+for vendor in claude codex; do
+  old_record="$tmp_dir/$vendor-old.json"
+  new_record="$tmp_dir/$vendor-new.json"
+  jq -cS --arg vendor "$vendor" '.tools[$vendor]' "$input" > "$old_record"
+  jq -cS --arg vendor "$vendor" '.tools[$vendor]' "$tmp_dir/release-inputs.json" > "$new_record"
+  order_name="${vendor}_order"
+  if [[ ${!order_name} == 0 ]] && ! cmp -s "$old_record" "$new_record"; then
+    die "$vendor metadata changed without a version change; refusing same-version drift"
+  fi
+done
+
+if ((claude_order == 0 && codex_order == 0)); then
+  printf 'Vendor inputs already current (Claude %s, Codex %s).\n' "$claude_version" "$codex_version"
+  exit 0
+fi
 
 jq -cS '
   .runtime.image_repository as $repository |
   del(.runtime) + {runtime: {image: ($repository + "@sha256:0000000000000000000000000000000000000000000000000000000000000000")}}
 ' "$tmp_dir/release-inputs.json" > "$tmp_dir/updated-manifest.json"
-python3 libexec/state.py --expected-version "$next_version" validate-manifest "$tmp_dir/updated-manifest.json" > /dev/null ||
+python3 libexec/state.py --expected-version "$SOURCE_VERSION_SENTINEL" validate-manifest "$tmp_dir/updated-manifest.json" > /dev/null ||
   die "updated release inputs do not satisfy the strict manifest contract"
 
 if [[ $mode == write ]]; then
   chmod --reference="$input" "$tmp_dir/release-inputs.json" 2> /dev/null || chmod 0644 "$tmp_dir/release-inputs.json"
-  chmod --reference="$version_file" "$tmp_dir/VERSION" 2> /dev/null || chmod 0644 "$tmp_dir/VERSION"
-  chmod --reference=package.json "$tmp_dir/package.json" 2> /dev/null || chmod 0644 "$tmp_dir/package.json"
-  chmod --reference=package-lock.json "$tmp_dir/package-lock.json" 2> /dev/null || chmod 0644 "$tmp_dir/package-lock.json"
   mv "$tmp_dir/release-inputs.json" "$input"
-  mv "$tmp_dir/VERSION" "$version_file"
-  mv "$tmp_dir/package.json" package.json
-  mv "$tmp_dir/package-lock.json" package-lock.json
-  printf 'Updated VERSION, release inputs, and package metadata: Agentbox %s, Claude %s, Codex %s.\n' \
-    "$next_version" "$claude_version" "$codex_version"
+  printf 'Updated vendor inputs only: Claude %s -> %s, Codex %s -> %s.\n' \
+    "$old_claude" "$claude_version" "$old_codex" "$codex_version"
 else
-  printf 'Would update Agentbox %s -> %s, Claude %s -> %s, Codex %s -> %s.\n' \
-    "$current_version" "$next_version" "$old_claude" "$claude_version" "$old_codex" "$codex_version"
+  printf 'Would update vendor inputs only: Claude %s -> %s, Codex %s -> %s.\n' \
+    "$old_claude" "$claude_version" "$old_codex" "$codex_version"
   jq -S . "$tmp_dir/release-inputs.json"
 fi

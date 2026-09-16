@@ -64,6 +64,7 @@ test("all authored shell and Python programs parse", () => {
     "libexec/state.py",
     "runtime/runtime",
     "scripts/inspect-codex-package.py",
+    "scripts/plan-release.py",
   ]) {
     if (!existsSync(resolve(ROOT, path))) continue;
     expectExit(
@@ -82,11 +83,10 @@ test("make help documents the supported developer targets", () => {
   }
 });
 
-test("one VERSION authority drives source metadata and release packaging", (t) => {
+test("source metadata uses the non-publishable version sentinel", (t) => {
   const rawVersion = read("VERSION");
   const version = rawVersion.trim();
-  assert.match(version, /^[0-9]+\.[0-9]+\.[0-9]+$/);
-  assert.equal(rawVersion, `${version}\n`);
+  assert.equal(rawVersion, "0.0.0\n");
   assert.equal(JSON.parse(read("release-inputs.json")).agentbox_version, version);
   assert.equal(JSON.parse(read("package.json")).version, version);
   const lock = JSON.parse(read("package-lock.json"));
@@ -110,12 +110,13 @@ test("one VERSION authority drives source metadata and release packaging", (t) =
   assert.equal(copiedVersion.stdout, "agentbox 9.8.7\n");
 
   const release = read("scripts/release.sh");
-  assert.match(release, /install -m 0444 VERSION "\$root\/VERSION"/);
-  assert.match(release, /install -m 0444 VERSION "\$root\/share\/agentbox\/VERSION"/);
+  assert.match(release, /printf '%s\\n' "\$version" > "\$root\/VERSION"/);
+  assert.match(release, /printf '%s\\n' "\$version" > "\$root\/share\/agentbox\/VERSION"/);
   assert.match(release, /--expected-version "\$version" validate-manifest/);
-  const dryRun = run("bash", ["scripts/release.sh", "--dry-run"]);
+  const dryRun = run("bash", ["scripts/release.sh", "--dry-run", "--version", "9.8.7"]);
   expectExit(dryRun, 0, "release dry run");
-  assert.match(dryRun.stdout, new RegExp(`agentbox-${version}\\.tar\\.gz`));
+  assert.match(dryRun.stdout, /agentbox-9\.8\.7\.tar\.gz/);
+  assert.equal(read("VERSION"), rawVersion, "dry run must not mutate the source sentinel");
 });
 
 test("host bridge is packaged and derives installed identity and account home", (t) => {
@@ -155,7 +156,10 @@ test("host bridge is packaged and derives installed identity and account home", 
   assert.match(formula, /agentbox-host-bridge/);
   const release = read("scripts/release.sh");
   assert.match(release, /required_files=\([\s\S]*setup-host-bridge\.sh/);
-  assert.match(release, /install -m 0555 setup-host-bridge\.sh "\$root\/setup-host-bridge\.sh"/);
+  assert.match(
+    release,
+    /install -m 0555 "\$source_root\/setup-host-bridge\.sh" "\$root\/setup-host-bridge\.sh"/,
+  );
 });
 
 test("host consumes one integrity-checked launch tuple", () => {
@@ -177,11 +181,11 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
   assert.match(workflow, /Smoke the exact runtime entrypoint on both platforms/);
   assert.match(
     workflow,
-    /docker run --rm --platform linux\/amd64[\s\\]*"\$IMAGE@\$\{\{ steps\.identities\.outputs\.amd64 \}\}" --help/,
+    /docker run --rm --platform linux\/amd64[\s\\]*"\$IMAGE@\$\{\{ needs\.publish_image\.outputs\.amd64 \}\}" --help/,
   );
   assert.match(
     workflow,
-    /docker run --rm --platform linux\/arm64[\s\\]*"\$IMAGE@\$\{\{ steps\.identities\.outputs\.arm64 \}\}" --help/,
+    /docker run --rm --platform linux\/arm64[\s\\]*"\$IMAGE@\$\{\{ needs\.publish_image\.outputs\.arm64 \}\}" --help/,
   );
   const jobHeader = workflow.slice(
     workflow.indexOf("  publish:"),
@@ -198,7 +202,7 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
   assert.match(workflow, /\.name == "required" and \.app\.slug == "github-actions"/);
   assert.match(workflow, /--match-head-commit "\$head"/);
   assert.match(workflow, /gh pr list --repo "\$repo" --head "\$branch" --state open/);
-  assert.match(workflow, /cp \.\.\/Formula\/agentbox\.rb Formula\/agentbox\.rb/);
+  assert.match(workflow, /cp \.\.\/dist\/source-agentbox\.rb Formula\/agentbox\.rb/);
 
   const updater = read(".github/workflows/update.yml");
   assert.match(updater, /\.name == "required" and \.app\.slug == "github-actions"/);

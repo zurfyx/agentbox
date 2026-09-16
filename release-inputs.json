@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "agentbox_version": "0.1.0",
+  "agentbox_version": "0.0.0",
   "runtime_protocol_version": 1,
   "runtime": { "image_repository": "ghcr.io/zurfyx/agentbox-runtime" },
   "tools": {
