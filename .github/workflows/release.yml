@@ -608,10 +608,20 @@ jobs:
         with:
           name: runtime-oci-${{ github.run_id }}
           path: /tmp/runtime-artifact
+      - name: Mint scoped draft read token
+        id: draft-read-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AGENTBOX_APP_ID }}
+          private-key: ${{ secrets.AGENTBOX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
       - name: Verify exact draft reservation before image mutation
         id: draft-state
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.draft-read-token.outputs.token }}
         run: |
           test -f /tmp/runtime-artifact/agentbox-runtime.oci.tar
           test ! -L /tmp/runtime-artifact/agentbox-runtime.oci.tar
@@ -630,7 +640,7 @@ jobs:
               .head_branch=="main" and .head_repository.full_name==$repo and
               .status=="completed" and .conclusion=="success")]|length>=1
           ' <<<"$ci_pages" >/dev/null
-          state=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          state=$(GH_TOKEN="$RELEASE_TOKEN" gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           latest_tag=$(jq -er '
             [.[][]|select(.draft==false and .prerelease==false)|
              select(.tag_name|test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))|
@@ -676,9 +686,10 @@ jobs:
         id: final-draft-state
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.draft-read-token.outputs.token }}
           EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
         run: |
-          state=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          state=$(GH_TOKEN="$RELEASE_TOKEN" gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           latest_tag=$(jq -er '[.[][]|select(.draft==false and .prerelease==false)|select(.tag_name|test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))|{tag:.tag_name,parts:(.tag_name[1:]|split(".")|map(tonumber))}]|sort_by(.parts)|last.tag' <<<"$state")
           IFS=. read -r major minor patch <<<"$VERSION"
           ((patch > 0))
@@ -703,11 +714,12 @@ jobs:
         id: existing-image
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.draft-read-token.outputs.token }}
           EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
         run: |
           verify_draft_snapshot() {
             local release live_snapshot
-            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+            release=$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
             jq -e --arg source "$SOURCE_COMMIT" '
               .draft==true and .prerelease==false and .target_commitish==$source
             ' <<<"$release" >/dev/null
@@ -780,9 +792,10 @@ jobs:
         if: steps.existing-image.outputs.present != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.draft-read-token.outputs.token }}
           EXPECTED_DRAFT_ASSET_SNAPSHOT: ${{ steps.draft-state.outputs.asset_snapshot }}
         run: |
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
+          release=$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION")
           jq -e --arg source "$SOURCE_COMMIT" '
             .draft==true and .prerelease==false and .target_commitish==$source
           ' <<<"$release" >/dev/null
