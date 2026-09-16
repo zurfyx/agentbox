@@ -22,6 +22,9 @@ on:
 permissions:
   contents: read
 
+env:
+  IMMUTABLE_RELEASES_ENABLED: ${{ vars.IMMUTABLE_RELEASES_ENABLED }}
+
 concurrency:
   group: release
   cancel-in-progress: false
@@ -327,12 +330,9 @@ jobs:
           } >>"$GITHUB_OUTPUT"
       - name: Require immutable releases before any publication mutation
         if: steps.release-plan.outputs.action != 'noop'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          settings=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases")
-          jq -e '.enabled == true' <<<"$settings" >/dev/null || {
-            echo "Repository immutable releases must be enabled before publication." >&2
+          [[ "$IMMUTABLE_RELEASES_ENABLED" == true ]] || {
+            echo "Set the IMMUTABLE_RELEASES_ENABLED repository variable after enabling immutable releases." >&2
             exit 1
           }
 
@@ -393,7 +393,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
-          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          test "$IMMUTABLE_RELEASES_ENABLED" = true
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > /tmp/releases.json
           gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
@@ -615,7 +615,7 @@ jobs:
           test ! -L /tmp/runtime-artifact/agentbox-runtime.oci.tar
           test "$(sha256sum /tmp/runtime-artifact/agentbox-runtime.oci.tar | awk '{print $1}')" = "$EXPECTED_OCI_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
-          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          test "$IMMUTABLE_RELEASES_ENABLED" = true
           git init -q /tmp/current-main
           git -C /tmp/current-main remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
           git -C /tmp/current-main fetch -q --no-tags origin main
@@ -968,8 +968,7 @@ jobs:
             echo "legacy v0.1.0 is prohibited from the release mutation path" >&2
             exit 1
           }
-          settings=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases")
-          jq -e '.enabled == true' <<<"$settings" >/dev/null
+          test "$IMMUTABLE_RELEASES_ENABLED" = true
 
           verify_tag() {
             local object type sha

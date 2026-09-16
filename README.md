@@ -325,6 +325,7 @@ published.
    repo=zurfyx/agentbox
    gh api --method PUT "repos/$repo/immutable-releases"
    test "$(gh api "repos/$repo/immutable-releases" --jq .enabled)" = true
+   gh variable set IMMUTABLE_RELEASES_ENABLED --repo "$repo" --body true
    ```
 
 2. Install the configured Agentbox GitHub App on both `agentbox` and
