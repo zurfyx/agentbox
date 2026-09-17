@@ -392,7 +392,7 @@ test("the public image is payload-free and non-root", () => {
   assert.match(dockerfile, /runtime/);
 });
 
-test("completions are static data and preserve the global-prefix boundary", (t) => {
+test("completions are static data and preserve the global-prefix boundary", async (t) => {
   const paths = [
     "completions/agentbox.bash",
     "completions/_agentbox",
@@ -415,8 +415,18 @@ test("completions are static data and preserve the global-prefix boundary", (t) 
   assert.match(fishSource, /__agentbox_is_lifecycle rollback/);
   assert.match(fishSource, /__agentbox_is_report_lifecycle/);
 
+  const zshSource = read("completions/_agentbox");
+  for (const array of ["after_no_update", "after_workspace_only", "after_both"]) {
+    const definition = zshSource.match(new RegExp(`${array}=\\([\\s\\S]*?\\n  \\)`))?.[0];
+    assert.ok(definition, `${array} completion definition is missing`);
+    for (const metaAction of ["help:", "-h:", "--help:", "--version:"]) {
+      assert.match(definition, new RegExp(metaAction.replace(/-/g, "\\-")), `${array}: ${metaAction}`);
+    }
+  }
+  assert.match(zshSource, /claude \| clauded \| codex \| --\) _files/);
+  assert.match(zshSource, /\*\) _files/);
+
   expectExit(run("bash", ["-n", "completions/agentbox.bash"]), 0, "Bash completion parse");
-  expectExit(run("zsh", ["-n", "completions/_agentbox"]), 0, "zsh completion parse");
 
   const complete = (...words) => {
     const script = [
@@ -477,78 +487,99 @@ test("completions are static data and preserve the global-prefix boundary", (t) 
   assert.deepEqual(complete("--", "--w"), []);
   assert.deepEqual(complete("--resume", "--w"), []);
 
-  const zshComplete = (...words) => {
-    const script = [
-      "completion=$1",
-      "shift",
-      'words=(agentbox "$@")',
-      "CURRENT=${#words[@]}",
-      'function _describe { local name=${argv[-1]}; print -l -- "${(@P)name}"; }',
-      'function _files { print "FILES"; }',
-      'source "$completion"',
-    ].join("\n");
-    const result = run("zsh", [
-      "-c",
-      script,
-      "agentbox-completion-test",
-      resolve(ROOT, "completions/_agentbox"),
-      ...words,
-    ]);
-    expectExit(result, 0, `zsh completion for ${JSON.stringify(words)}`);
-    return result.stdout.trim().split("\n").filter(Boolean);
-  };
-  const zshAfterGlobal = zshComplete("--workspace-only", "");
-  for (const expected of ["--no-update", "help", "-h", "--help", "--version"]) {
-    assert.ok(zshAfterGlobal.some((entry) => entry.startsWith(`${expected}:`)), expected);
-  }
-  assert.deepEqual(zshComplete("claude", "setup", ""), ["FILES"]);
-  assert.deepEqual(zshComplete("--", "doctor", ""), ["FILES"]);
-  assert.deepEqual(zshComplete("--resume", "rollback", ""), ["FILES"]);
+  const zshLookup = run("/bin/sh", ["-c", "command -v zsh"]);
+  const zsh = zshLookup.status === 0 ? zshLookup.stdout.trim() : "";
+  await t.test(
+    "zsh parsing and dynamic boundary checks",
+    { skip: zsh ? false : "zsh is unavailable; unconditional static zsh assertions still ran" },
+    () => {
+      expectExit(run(zsh, ["-n", "completions/_agentbox"]), 0, "zsh completion parse");
+      const zshComplete = (...words) => {
+        const script = [
+          "completion=$1",
+          "shift",
+          'words=(agentbox "$@")',
+          "CURRENT=${#words[@]}",
+          'function _describe { local name=${argv[-1]}; print -l -- "${(@P)name}"; }',
+          'function _files { print "FILES"; }',
+          'source "$completion"',
+        ].join("\n");
+        const result = run(zsh, [
+          "-c",
+          script,
+          "agentbox-completion-test",
+          resolve(ROOT, "completions/_agentbox"),
+          ...words,
+        ]);
+        expectExit(result, 0, `zsh completion for ${JSON.stringify(words)}`);
+        return result.stdout.trim().split("\n").filter(Boolean);
+      };
+      const zshAfterGlobal = zshComplete("--workspace-only", "");
+      for (const expected of ["--no-update", "help", "-h", "--help", "--version"]) {
+        assert.ok(zshAfterGlobal.some((entry) => entry.startsWith(`${expected}:`)), expected);
+      }
+      assert.deepEqual(zshComplete("claude", "setup", ""), ["FILES"]);
+      assert.deepEqual(zshComplete("--", "doctor", ""), ["FILES"]);
+      assert.deepEqual(zshComplete("--resume", "rollback", ""), ["FILES"]);
+    },
+  );
 
   const fishLookup = run("/bin/sh", ["-c", "command -v fish"]);
-  if (fishLookup.status === 0) {
-    const fish = fishLookup.stdout.trim();
-    const cwd = tempDir(t);
-    writeFileSync(resolve(cwd, "forwarded-file"), "fixture\n");
-    const fishComplete = (line) => {
-      const result = run(
-        fish,
-        [
-          "-c",
-          "source $argv[1]; cd $argv[2]; complete -C $argv[3]",
-          resolve(ROOT, "completions/agentbox.fish"),
-          cwd,
-          line,
-        ],
-      );
-      expectExit(result, 0, `Fish completion for ${JSON.stringify(line)}`);
-      return result.stdout
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((entry) => entry.split("\t", 1)[0]);
-    };
+  const fish = fishLookup.status === 0 ? fishLookup.stdout.trim() : "";
+  await t.test(
+    "Fish parsing and dynamic boundary checks",
+    { skip: fish ? false : "Fish is unavailable; unconditional static Fish assertions still ran" },
+    () => {
+      const cwd = tempDir(t);
+      writeFileSync(resolve(cwd, "forwarded-file"), "fixture\n");
+      const fishComplete = (line) => {
+        const result = run(
+          fish,
+          [
+            "-c",
+            "source $argv[1]; cd $argv[2]; complete -C $argv[3]",
+            resolve(ROOT, "completions/agentbox.fish"),
+            cwd,
+            line,
+          ],
+        );
+        expectExit(result, 0, `Fish completion for ${JSON.stringify(line)}`);
+        return result.stdout
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((entry) => entry.split("\t", 1)[0]);
+      };
 
-    const afterGlobal = fishComplete("agentbox --workspace-only ");
-    for (const expected of ["--no-update", "claude", "codex", "help", "-h", "--help", "--version"]) {
-      assert.ok(afterGlobal.includes(expected), expected);
-    }
-    assert.ok(fishComplete("agentbox setup --").includes("--reset-selector"));
-    assert.ok(fishComplete("agentbox doctor --").includes("--json"));
+      const afterGlobal = fishComplete("agentbox --workspace-only ");
+      for (const expected of [
+        "--no-update",
+        "claude",
+        "codex",
+        "help",
+        "-h",
+        "--help",
+        "--version",
+      ]) {
+        assert.ok(afterGlobal.includes(expected), expected);
+      }
+      assert.ok(fishComplete("agentbox setup --").includes("--reset-selector"));
+      assert.ok(fishComplete("agentbox doctor --").includes("--json"));
 
-    for (const line of [
-      "agentbox claude setup f",
-      "agentbox codex doctor f",
-      "agentbox -- setup f",
-      "agentbox --resume rollback f",
-    ]) {
-      const result = fishComplete(line);
-      assert.ok(result.includes("forwarded-file"), line);
-      assert.ok(!result.includes("--reset-selector"), line);
-      assert.ok(!result.includes("--accept-vendor-state-risk"), line);
-      assert.ok(!result.includes("--json"), line);
-    }
-  }
+      for (const line of [
+        "agentbox claude setup f",
+        "agentbox codex doctor f",
+        "agentbox -- setup f",
+        "agentbox --resume rollback f",
+      ]) {
+        const result = fishComplete(line);
+        assert.ok(result.includes("forwarded-file"), line);
+        assert.ok(!result.includes("--reset-selector"), line);
+        assert.ok(!result.includes("--accept-vendor-state-risk"), line);
+        assert.ok(!result.includes("--json"), line);
+      }
+    },
+  );
 });
 
 test("the fast hook stays local and CI remains the full check", () => {
