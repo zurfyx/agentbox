@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import platform as host_platform
+import pwd
 import urllib.request
 import unicodedata
 import uuid
@@ -382,6 +383,159 @@ def write_activation(path: Path, value: dict[str, Any]) -> None:
 def clean_engine_env() -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "LC_ALL": "C", "LANG": "C"}
 
+def path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+def mount_safe_path(path: Path, where: str, *, must_exist: bool = True) -> Path:
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        fail(f"{where} must be an absolute normalized path")
+    text = str(path)
+    if "," in text or any(unicodedata.category(character) == "Cc" for character in text):
+        fail(f"{where} cannot be represented safely as a Docker mount path")
+    try:
+        canonical = path.resolve(strict=must_exist)
+    except (OSError, RuntimeError) as exc:
+        fail(f"cannot resolve {where}: {exc}")
+    if canonical != path:
+        fail(f"{where} must be a canonical physical path")
+    if must_exist and not canonical.is_dir():
+        fail(f"{where} must be an existing directory")
+    return canonical
+
+def read_plain_link_file(path: Path, where: str) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            os.close(fd)
+            fail(f"{where} must be a small plain file")
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(4097)
+    except OSError as exc:
+        fail(f"cannot read {where}: {exc}")
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{where} is not UTF-8")
+    if value.endswith("\n"):
+        value = value[:-1]
+    if not value or "\n" in value or "\r" in value:
+        fail(f"{where} is malformed")
+    return value
+
+def git_marker_exists(cwd: Path) -> bool:
+    for directory in (cwd, *cwd.parents):
+        marker = directory / ".git"
+        try:
+            marker.lstat()
+            return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    return False
+
+def git_query(cwd: Path, *arguments: str) -> tuple[int, str]:
+    git = Path("/usr/bin/git")
+    if not git.is_file() or not os.access(git, os.X_OK) or git.is_symlink():
+        fail("workspace-only requires the trusted /usr/bin/git executable")
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/var/empty",
+        "LC_ALL": "C",
+        "LANG": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    try:
+        result = subprocess.run(
+            [str(git), "-C", str(cwd), "rev-parse", *arguments],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"could not resolve workspace Git metadata: {exc}")
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("workspace Git metadata is not UTF-8")
+    if output.endswith("\n"):
+        output = output[:-1]
+    return result.returncode, output
+
+def git_path(cwd: Path, where: str, *arguments: str) -> Path:
+    status, output = git_query(cwd, *arguments)
+    if status != 0 or not output:
+        fail(f"could not resolve {where}")
+    return mount_safe_path(Path(output), where)
+
+def reject_object_alternates(common_dir: Path) -> None:
+    alternates = common_dir / "objects" / "info" / "alternates"
+    try:
+        alternates.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        fail(f"cannot inspect Git object alternates: {exc}")
+    fail("workspace uses unsupported Git object alternates")
+
+def workspace_plan(cwd_arg: Path, agentbox_home_arg: Path) -> dict[str, Any]:
+    cwd = mount_safe_path(cwd_arg, "working directory")
+    agentbox_home = mount_safe_path(agentbox_home_arg, "Agentbox home", must_exist=False)
+    try:
+        account_home = mount_safe_path(
+            Path(pwd.getpwuid(os.getuid()).pw_dir), "account home"
+        )
+    except KeyError:
+        fail("cannot resolve the current account home")
+
+    status, inside = git_query(cwd, "--is-inside-work-tree")
+    metadata: list[Path] = []
+    if status != 0:
+        if git_marker_exists(cwd):
+            fail("workspace has unsafe or unresolvable Git metadata")
+        root = cwd
+    else:
+        if inside != "true":
+            fail("workspace-only does not support bare or non-worktree Git repositories")
+        root = git_path(cwd, "Git worktree root", "--path-format=absolute", "--show-toplevel")
+        git_dir = git_path(cwd, "Git directory", "--absolute-git-dir")
+        common_dir = git_path(cwd, "Git common directory", "--path-format=absolute", "--git-common-dir")
+        reject_object_alternates(common_dir)
+        if not path_is_within(cwd, root):
+            fail("working directory is outside the resolved Git worktree")
+        expected_git_dir = root / ".git"
+        if git_dir == expected_git_dir and common_dir == expected_git_dir:
+            pass
+        else:
+            if path_is_within(git_dir, root) or path_is_within(common_dir, root):
+                fail("workspace does not use the standard in-tree Git metadata layout")
+            if git_dir.parent != common_dir / "worktrees" or git_dir == common_dir:
+                fail("workspace uses unsupported external Git metadata")
+            pointer = read_plain_link_file(root / ".git", "linked-worktree .git pointer")
+            backlink = read_plain_link_file(git_dir / "gitdir", "linked-worktree backlink")
+            commondir = read_plain_link_file(git_dir / "commondir", "linked-worktree common-dir pointer")
+            if pointer != f"gitdir: {git_dir}" or backlink != str(root / ".git") or commondir != "../..":
+                fail("workspace is not a structurally valid standard linked worktree")
+            metadata.append(common_dir)
+
+    physical_tmp = Path("/tmp").resolve(strict=False)
+    unsafe_roots = {Path("/"), Path("/Users"), Path("/Volumes"), physical_tmp, Path("/private/tmp")}
+    for candidate, where in ((root, "workspace root"), *((item, "Git common directory") for item in metadata)):
+        if candidate in unsafe_roots or candidate == account_home:
+            fail(f"unsafe {where} is too broad for workspace-only mode")
+        if path_is_within(candidate, agentbox_home) or path_is_within(agentbox_home, candidate):
+            fail(f"{where} overlaps the persistent Agentbox home")
+
+    return {"cwd": str(cwd), "root": str(root), "metadata": [str(item) for item in metadata]}
+
 def selected_platform(manifest: dict[str, Any]) -> tuple[str, dict[str, dict[str, Any]]]:
     machine = host_platform.machine().lower()
     name = "linux/arm64" if machine in {"arm64", "aarch64"} else "linux/amd64" if machine in {"x86_64", "amd64"} else ""
@@ -745,8 +899,9 @@ def main() -> int:
     prep.add_argument("--reset-selector", action="store_true")
     prep.add_argument("--agent", choices=("claude", "codex", "all"), default="all")
     rollback_parser = sub.add_parser("rollback"); rollback_parser.add_argument("--root", required=True, type=Path); rollback_parser.add_argument("--accept-vendor-state-risk", action="store_true")
-    locked = sub.add_parser("exec-locked"); locked.add_argument("--root", required=True, type=Path); locked.add_argument("argv", nargs=argparse.REMAINDER)
-    execute = sub.add_parser("exec-engine"); execute.add_argument("argv", nargs=argparse.REMAINDER)
+    workspace = sub.add_parser("workspace-plan"); workspace.add_argument("--cwd", required=True, type=Path); workspace.add_argument("--agentbox-home", required=True, type=Path)
+    locked = sub.add_parser("exec-locked"); locked.add_argument("--root", required=True, type=Path); locked.add_argument("--without-github", action="store_true"); locked.add_argument("argv", nargs=argparse.REMAINDER)
+    execute = sub.add_parser("exec-engine"); execute.add_argument("--without-github", action="store_true"); execute.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if hasattr(args, "root"):
         qualify_root(args.root)
@@ -773,6 +928,8 @@ def main() -> int:
     elif args.command == "rollback":
         if not args.accept_vendor_state_risk: fail("rollback requires --accept-vendor-state-risk")
         print(json.dumps(rollback(args.root, args.development), sort_keys=True))
+    elif args.command == "workspace-plan":
+        print(json.dumps(workspace_plan(args.cwd, args.agentbox_home), sort_keys=True))
     elif args.command == "exec-locked":
         if not args.argv or args.argv[0] != "--" or len(args.argv) == 1: fail("exec-locked requires -- COMMAND [ARG ...]")
         ensure_root(args.root)
@@ -780,12 +937,14 @@ def main() -> int:
         with os.fdopen(fd, "r+") as lock:
             try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: fail("another Agentbox authentication operation is running")
-            child_env = clean_engine_env(); child_env["GH_TOKEN"] = os.environ.get("GH_TOKEN", "")
+            child_env = clean_engine_env()
+            if not args.without_github: child_env["GH_TOKEN"] = os.environ.get("GH_TOKEN", "")
             if os.environ.get("OPENAI_API_KEY"): child_env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
             return subprocess.run(args.argv[1:], env=child_env).returncode
     elif args.command == "exec-engine":
         if not args.argv or args.argv[0] != "--" or len(args.argv) == 1: fail("exec-engine requires -- COMMAND [ARG ...]")
-        child_env = clean_engine_env(); child_env["GH_TOKEN"] = os.environ.get("GH_TOKEN", "")
+        child_env = clean_engine_env()
+        if not args.without_github: child_env["GH_TOKEN"] = os.environ.get("GH_TOKEN", "")
         if os.environ.get("OPENAI_API_KEY"): child_env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
         os.execve(args.argv[1], args.argv[1:], child_env)
     return 0

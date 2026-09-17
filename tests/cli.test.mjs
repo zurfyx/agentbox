@@ -23,7 +23,9 @@ import {
 import {
   ROOT,
   expectExit,
+  preparedLaunchFixture,
   readNul,
+  recordingEngine,
   run,
   tempDir,
   writeExecutable,
@@ -45,41 +47,7 @@ function bindManagedFiles(value) {
 }
 
 function fixture(t) {
-  const dir = tempDir(t);
-  const home = resolve(dir, "personal");
-  const runtimeRoot = resolve(home, "runtime");
-  const artifacts = createVendorDownloads(dir);
-  const downloads = artifacts.downloads;
-  const value = bindManagedFiles(bindArtifacts(manifest(), artifacts));
-  const manifestPath = resolve(dir, "release-manifest.json");
-  writeManifest(manifestPath, value);
-
-  const setupEngine = resolve(dir, "setup-engine");
-  writeProtocolEngine(setupEngine);
-  const prepared = run(
-    "python3",
-    [
-      "-I",
-      STATE,
-      "--expected-version",
-      VERSION,
-      "prepare",
-      "--root",
-      runtimeRoot,
-      "--manifest",
-      manifestPath,
-      "--engine",
-      setupEngine,
-    ],
-    {
-      env: {
-        AGENTBOX_TEST_MODE: "1",
-        AGENTBOX_TEST_DOWNLOAD_DIR: downloads,
-      },
-    },
-  );
-  expectExit(prepared, 0, "fixture state preparation");
-  return { dir, downloads, home, manifestPath };
+  return preparedLaunchFixture(t);
 }
 
 function cli(args, fixture, engine, env = {}) {
@@ -94,23 +62,6 @@ function cli(args, fixture, engine, env = {}) {
       ...env,
     },
   });
-}
-
-function recordingEngine(dir, exitCode = 0) {
-  const path = resolve(dir, `engine-${exitCode}`);
-  const argv = resolve(dir, `engine-${exitCode}.argv`);
-  const environment = resolve(dir, `engine-${exitCode}.env`);
-  writeExecutable(
-    path,
-    `#!/bin/sh
-if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
-if [ "$1" = version ]; then exit 0; fi
-printf '%s\\0' "$@" > '${argv}'
-env > '${environment}'
-exit ${exitCode}
-`,
-  );
-  return { argv, environment, path };
 }
 
 test("help and version do not require a manifest or create state", (t) => {

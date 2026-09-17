@@ -9,6 +9,8 @@ completions; Agentbox does not edit shell startup files.
 Run Agentbox from the directory you want the agent to work in:
 
 ```sh
+agentbox [--workspace-only] [--no-update] [claude|clauded|codex] [--] [ARG ...]
+
 agentbox                         # Claude Code (default)
 agentbox "fix the flaky test"    # arguments pass through unchanged
 agentbox --resume               # unknown root flags belong to Claude
@@ -17,6 +19,8 @@ agentbox clauded --resume       # Claude with --dangerously-skip-permissions
 agentbox codex                  # Codex with approvals and sandbox bypassed
 agentbox -- setup               # pass reserved word "setup" to Claude
 agentbox --no-update claude     # use an already selected compatible release
+agentbox --workspace-only       # workspace-limited default Claude launch
+agentbox --workspace-only codex # workspace-limited Codex launch
 ```
 
 On first launch, Agentbox downloads, verifies, and validates only the requested
@@ -24,11 +28,64 @@ vendor. `clauded` prepares the Claude artifact but remains a distinct launch
 mode. Launching the other vendor later adds it to a new immutable prepared
 snapshot while retaining verified artifacts and user-owned state.
 
-After an agent selector, arguments are opaque vendor arguments. `--no-update`
-is an Agentbox option only before the selector. `clauded` and `codex` are
-intentionally dangerous shortcuts: Agentbox adds the vendor's permission or
-sandbox bypass flag before the arguments you supply. Review the
-[security model](security.md) before using them.
+`--workspace-only` and `--no-update` are Agentbox options only in the leading
+prefix. Each may appear at most once, and they may appear in either order.
+Agentbox stops parsing that prefix at a selector, `--`, or the first unknown
+argument (which starts the default Claude payload). Everything from that point
+is forwarded unchanged, so `agentbox codex --workspace-only` passes the flag to
+Codex instead of enabling the Agentbox mode. Global Agentbox flags do not apply
+to lifecycle commands. `clauded` and `codex` are intentionally dangerous
+shortcuts: Agentbox adds the vendor's permission or sandbox bypass flag before
+the arguments you supply. Review the [security model](security.md) before using
+them.
+
+The harmless global meta-actions `help`, `-h`, `--help`, and `--version` are
+early-exit exceptions: they are accepted after either or both global options,
+ignore those options, print help or the version, and exit without preparing or
+launching an agent. For example, `agentbox --workspace-only --help` describes
+the mode without resolving a workspace or contacting Docker.
+
+### Workspace-only access
+
+Use the opt-in mode when the agent needs the current project but not Agentbox's
+normal broad host mounts:
+
+```sh
+agentbox --workspace-only claude
+agentbox --no-update --workspace-only codex
+agentbox --workspace-only -- "review this project"
+```
+
+Inside a Git worktree, Agentbox mounts the canonical top-level worktree
+read/write at the same absolute path and preserves the physical current
+directory as the container working directory. Outside Git, it mounts exactly
+the physical current directory. A standard linked worktree also requires its
+common Git directory read/write at the same absolute path; that exposes shared
+objects, refs, hooks, configuration, and metadata for sibling worktrees, but
+not sibling working-tree files. Contained metadata mounts are deduplicated.
+
+The policy is fixed: there are no custom mount, credential, profile, or network
+parameters. Workspace-only omits broad `/Users`, `/Volumes`, host `/tmp`, and
+host `/private/tmp` binds; `/tmp` is a bounded, container-local tmpfs. It keeps
+the persistent Agentbox vendor home at `/home/node` read/write, while masking
+its `.ssh` directory for the session, and keeps the selected vendor, managed
+runtime, and manifest mounts read-only. It neither reads nor forwards a host
+`GH_TOKEN` and does not provide the optional `onhost` bridge.
+
+Network access remains enabled. Existing Claude/Codex login state in the
+persistent vendor home remains available, and `OPENAI_API_KEY` remains
+available to workspace-only Codex launches when set. The agent can therefore
+modify or exfiltrate workspace and vendor-home data, use vendor credentials,
+reach network services (including reachable host services), and leave
+persistent state for later sessions. Workspace-only is a host-filesystem access
+limitation and defense-in-depth measure, not a hostile-code sandbox.
+
+Agentbox rejects unsafe or unresolvable workspace scopes instead of widening
+access. Arbitrary separate Git directories, external object alternates, and a
+submodule selected as the workspace root when its required metadata is outside
+the allowed scope are not supported. Use normal mode only when its broader
+authority is intended. Launches without `--workspace-only` retain the normal
+mount, credential, bridge, working-directory, and argument behavior.
 
 Lifecycle words are reserved. `agentbox -- setup`, for example, sends `setup`
 to Claude instead of invoking the lifecycle command. Leading Claude `install`,

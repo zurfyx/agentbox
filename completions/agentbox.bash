@@ -13,33 +13,48 @@ _agentbox_add_matches() {
 _agentbox_complete() {
   local current=${COMP_WORDS[COMP_CWORD]}
   local first=${COMP_WORDS[1]-}
-  local lifecycle index word
+  local lifecycle index word seen_no_update=0 seen_workspace_only=0
   COMPREPLY=()
 
-  if ((COMP_CWORD == 1)); then
-    _agentbox_add_matches "$current" \
-      claude clauded codex setup update rollback doctor info help \
-      --no-update --help --version
+  # Agentbox owns only the closed prefix of global flags. Once a selector,
+  # separator, lifecycle command, or Claude payload has appeared, completion
+  # belongs to that command/vendor and ordinary filename fallback remains on.
+  for ((index = 1; index < COMP_CWORD; index++)); do
+    word=${COMP_WORDS[index]}
+    case "$word" in
+      --no-update)
+        ((seen_no_update == 0)) || return 0
+        seen_no_update=1
+        ;;
+      --workspace-only)
+        ((seen_workspace_only == 0)) || return 0
+        seen_workspace_only=1
+        ;;
+      *) break ;;
+    esac
+  done
+
+  if ((index == COMP_CWORD)); then
+    _agentbox_add_matches "$current" claude clauded codex
+    ((seen_no_update == 0)) && _agentbox_add_matches "$current" --no-update
+    ((seen_workspace_only == 0)) && _agentbox_add_matches "$current" --workspace-only
+    if ((index == 1)); then
+      _agentbox_add_matches "$current" setup update rollback doctor info
+    else
+      _agentbox_add_matches "$current" --
+    fi
+    _agentbox_add_matches "$current" help -h --help --version
     return 0
   fi
 
-  if [[ $first == --no-update ]]; then
-    if ((COMP_CWORD == 2)); then
-      _agentbox_add_matches "$current" claude clauded codex --
-      return 0
-    fi
-    first=${COMP_WORDS[2]-}
-    case "$first" in
-      claude | clauded | codex | --) return 0 ;;
-      setup | update | rollback | doctor | info | help | -h | --help | --version)
-        COMPREPLY=("")
-        return 0
-        ;;
-      *) return 0 ;;
-    esac
-  fi
-
+  first=${COMP_WORDS[index]}
   [[ $first == claude || $first == clauded || $first == codex || $first == -- ]] && return 0
+  if ((index != 1)); then
+    case "$first" in
+      setup | update | rollback | doctor | info | help | -h | --help | --version) COMPREPLY=("") ;;
+    esac
+    return 0
+  fi
 
   case "$first" in
     doctor | info) lifecycle=report ;;
