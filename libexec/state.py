@@ -203,7 +203,7 @@ def load_activation(root: Path, development: bool = False) -> dict[str, Any] | N
     if checksum != expected or raw != canonical_bytes(record): fail("activation checksum or canonical encoding is invalid")
     return record
 
-def verify_ref(root: Path, ref: dict[str, Any], development: bool = False) -> None:
+def verify_ref(root: Path, ref: dict[str, Any], development: bool = False) -> set[str]:
     release = Path(ref["release_path"])
     expected_release = root / "releases" / ref["release_id"]
     if release != expected_release or release.name != ref["release_id"] or ".." in release.parts:
@@ -217,9 +217,10 @@ def verify_ref(root: Path, ref: dict[str, Any], development: bool = False) -> No
         fail("active release version does not match activation")
     if manifest["runtime"]["image"] != ref["runtime_image"]:
         fail("active runtime image does not match activation")
-    content_hash, validation_hash = verify_release_content(release, digest, ref["runtime_image"])
+    content_hash, validation_hash, ready_agents = verify_release_content(release, digest, ref["runtime_image"])
     if content_hash != ref["content_sha256"] or validation_hash != ref["validation_sha256"]:
         fail("active release content or validation receipt does not match activation")
+    return ready_agents
 
 def ensure_directory_no_symlinks(path: Path) -> None:
     current = Path(path.anchor)
@@ -254,7 +255,7 @@ def load_canonical_json(path: Path, where: str) -> tuple[dict[str, Any], bytes]:
     if raw != canonical: fail(f"{where} is not canonical JSON")
     return value, raw
 
-def verify_content_ledger(release: Path, manifest_digest: str) -> tuple[str, str]:
+def verify_content_ledger(release: Path, manifest_digest: str) -> tuple[str, str, set[str]]:
     content_path = release / "vendor" / "content.json"
     try: content_info = content_path.lstat()
     except OSError as exc: fail(f"cannot inspect content ledger: {exc}")
@@ -308,11 +309,17 @@ def verify_content_ledger(release: Path, manifest_digest: str) -> tuple[str, str
                 fail(f"managed content contains a special file: {relative}")
             actual_paths.add(relative)
     if actual_paths != set(paths) | {"vendor/content.json"}: fail("managed content has missing or unexpected paths")
+    agents: set[str] = set()
+    for path_text in paths:
+        parts = PurePosixPath(path_text).parts
+        if len(parts) < 2 or parts[0] != "vendor" or parts[1] not in {"claude", "codex"}:
+            fail(f"content ledger contains an unsupported vendor path: {path_text}")
+        agents.add(parts[1])
     content_hash = hashlib.sha256(content_bytes).hexdigest()
-    return content_hash, content["platform"]
+    return content_hash, content["platform"], agents
 
-def verify_release_content(release: Path, manifest_digest: str, runtime_image: str) -> tuple[str, str]:
-    content_hash, content_platform = verify_content_ledger(release, manifest_digest)
+def verify_release_content(release: Path, manifest_digest: str, runtime_image: str) -> tuple[str, str, set[str]]:
+    content_hash, content_platform, content_agents = verify_content_ledger(release, manifest_digest)
     validation_path = release / "validation.json"
     try: validation_info = validation_path.lstat()
     except OSError as exc: fail(f"cannot inspect validation receipt: {exc}")
@@ -323,10 +330,29 @@ def verify_release_content(release: Path, manifest_digest: str, runtime_image: s
     assertions = exact_object(validation["assertions"], {"claude_behavior", "claude_version", "codex_behavior", "codex_layout", "codex_version", "instructions", "runtime_protocol", "status_line"}, "validation assertions")
     if (validation["schema"] != 1 or validation["runtime_protocol"] != 1 or validation["platform"] != content_platform
             or validation["manifest_sha256"] != f"sha256:{manifest_digest}"
-            or validation["content_sha256"] != f"sha256:{content_hash}" or validation["runtime_image"] != runtime_image
-            or any(value is not True for value in assertions.values())):
+            or validation["content_sha256"] != f"sha256:{content_hash}" or validation["runtime_image"] != runtime_image):
         fail("validation receipt does not match the validated release")
-    return content_hash, hashlib.sha256(validation_bytes).hexdigest()
+    if any(assertions[name] is not True for name in ("instructions", "runtime_protocol", "status_line")):
+        fail("validation receipt does not pass shared runtime assertions")
+    ready_agents: set[str] = set()
+    if assertions["claude_behavior"] is True and assertions["claude_version"] is True:
+        ready_agents.add("claude")
+    elif assertions["claude_behavior"] is not False or assertions["claude_version"] is not False:
+        fail("validation receipt has inconsistent Claude assertions")
+    codex_assertions = (assertions["codex_behavior"], assertions["codex_layout"], assertions["codex_version"])
+    if all(value is True for value in codex_assertions):
+        ready_agents.add("codex")
+    elif any(value is not False for value in codex_assertions):
+        fail("validation receipt has inconsistent Codex assertions")
+    if ready_agents != content_agents:
+        fail("validation receipt readiness does not match managed content")
+    return content_hash, hashlib.sha256(validation_bytes).hexdigest(), ready_agents
+
+def agent_content_identity(release: Path, agent: str) -> list[dict[str, Any]]:
+    content, _ = load_canonical_json(release / "vendor" / "content.json", "content ledger")
+    prefix = f"vendor/{agent}"
+    return [entry for entry in content["entries"]
+            if entry["path"] == prefix or entry["path"].startswith(prefix + "/")]
 
 def fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -364,6 +390,10 @@ def selected_platform(manifest: dict[str, Any]) -> tuple[str, dict[str, dict[str
     for tool in ("claude", "codex"):
         selected[tool] = next(item for item in manifest["tools"][tool]["platforms"] if item["platform"] == name)
     return name, selected
+
+def tool_reuse_identity(manifest: dict[str, Any], agent: str, platform_record: dict[str, Any]) -> bytes:
+    shared = {key: value for key, value in manifest["tools"][agent].items() if key != "platforms"}
+    return canonical_bytes({"platform": platform_record, "tool": shared})
 
 def download_artifact(spec: dict[str, Any], destination: Path, agentbox_version: str) -> None:
     if os.environ.get("AGENTBOX_TEST_MODE") == "1" and os.environ.get("AGENTBOX_TEST_DOWNLOAD_DIR"):
@@ -485,12 +515,13 @@ def activate(root: Path, manifest: dict[str, Any], digest: str, release: Path, c
     current = {"release_id": release.name, "agentbox_version": manifest["agentbox_version"], "manifest_sha256": digest,
                "content_sha256": content_hash, "validation_sha256": validation_hash,
                "runtime_image": manifest["runtime"]["image"], "release_path": str(release)}
-    if old is not None and old["current"]["manifest_sha256"] == digest:
-        verify_ref(root, old["current"], development); return old
     if old is not None and old["selection"]["mode"] == "manual_rollback_hold":
-        return old
+        fail("manual rollback hold is active; run `agentbox setup --reset-selector` to validate and select the installed release")
+    if old is not None and old["current"] == current:
+        verify_ref(root, old["current"], development); return old
+    previous = None if old is None else (old["previous"] if old["current"]["manifest_sha256"] == digest else old["current"])
     record = {"schema_version": STATE_SCHEMA, "generation": 1 if old is None else old["generation"] + 1,
-              "current": current, "previous": None if old is None else old["current"],
+              "current": current, "previous": previous,
               "selection": {"mode": "normal", "reason": None}}
     write_activation(root / "activation.json", record)
     return record
@@ -518,24 +549,29 @@ def candidate_tmpfs(path: str, size: str, *, executable: bool = False) -> str:
         options.append("noexec")
     return f"{path}:{','.join(options)}"
 
-def validate_release(engine: Path, image: str, platform_name: str, release: Path, manifest: dict[str, Any]) -> dict[str, bool]:
+def validate_release(engine: Path, image: str, platform_name: str, release: Path, manifest: dict[str, Any], agent: str) -> dict[str, bool]:
     name = f"agentbox-validate-{uuid.uuid4().hex}"
     raw = run_checked([str(engine), "run", "--rm", *candidate_limits(name), "--network", "none", "--read-only", "--tmpfs", candidate_tmpfs("/tmp", "16m"),
                        "--tmpfs", candidate_tmpfs("/home/node", "64m", executable=True), "--tmpfs", candidate_tmpfs("/run", "4m"),
                        "--mount", f"type=bind,src={release},dst=/opt/agentbox-release,readonly", image, "validate", "--protocol", "1",
-                       "--platform", platform_name, "--manifest", "/opt/agentbox-release/manifest.json", "--candidate", "/opt/agentbox-release/vendor"],
+                       "--platform", platform_name, "--manifest", "/opt/agentbox-release/manifest.json", "--agent", agent,
+                       "--candidate", "/opt/agentbox-release/vendor"],
                       capture=True, timeout=180, cleanup=(engine, name))
     result = protocol_json(raw, {"assertions", "claude_version", "codex_version", "ok", "protocol"}, "runtime validation result")
     assertions = exact_object(result["assertions"], {"claude_behavior", "claude_version", "codex_behavior", "codex_layout", "codex_version", "instructions", "runtime_protocol", "status_line"}, "runtime validation assertions")
-    if (result["ok"] is not True or result["protocol"] != 1 or any(value is not True for value in assertions.values())
-            or result["claude_version"] != manifest["tools"]["claude"]["version"]
-            or result["codex_version"] != manifest["tools"]["codex"]["version"]):
+    requested = {"claude", "codex"} if agent == "all" else {agent}
+    required = {"instructions", "runtime_protocol", "status_line"}
+    if "claude" in requested: required |= {"claude_behavior", "claude_version"}
+    if "codex" in requested: required |= {"codex_behavior", "codex_layout", "codex_version"}
+    if (result["ok"] is not True or result["protocol"] != 1 or any(assertions[name] is not True for name in required)
+            or ("claude" in requested and result["claude_version"] != manifest["tools"]["claude"]["version"])
+            or ("codex" in requested and result["codex_version"] != manifest["tools"]["codex"]["version"])):
         fail("runtime validation did not pass every required assertion")
     return assertions
 
 def create_validation_receipt(release: Path, manifest: dict[str, Any], digest: str, image: str,
                               platform_name: str, prepare_result: dict[str, Any], assertions: dict[str, bool]) -> tuple[str, str]:
-    content_hash, _ = verify_content_ledger(release, digest)
+    content_hash, _, _ = verify_content_ledger(release, digest)
     if prepare_result["content_sha256"] != f"sha256:{content_hash}": fail("runtime prepare receipt does not match content.json")
     receipt = {"assertions": assertions, "content_sha256": f"sha256:{content_hash}", "manifest_sha256": f"sha256:{digest}",
                "platform": platform_name, "runtime_image": image, "runtime_protocol": 1, "schema": 1}
@@ -545,14 +581,40 @@ def create_validation_receipt(release: Path, manifest: dict[str, Any], digest: s
     return content_hash, file_hash(path)
 
 def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str, development: bool = False,
-            reset_selector: bool = False) -> None:
+            reset_selector: bool = False, agent: str = "all") -> None:
     manifest, digest = load_manifest(manifest_path, expected_version, development)
     ensure_root(root)
     lock_path = root / "locks" / "prepare.lock"
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(lock_fd, "r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        release_id = f"{manifest['agentbox_version']}-{digest[:16]}"
+        requested = {"claude", "codex"} if agent == "all" else {agent}
+        reusable: set[str] = set()
+        reuse_identities: dict[str, list[dict[str, Any]]] = {}
+        reusable_release: Path | None = None
+        old = load_activation(root, development)
+        if old is not None and old["selection"]["mode"] == "manual_rollback_hold" and not reset_selector:
+            fail("manual rollback hold is active; run `agentbox setup --reset-selector` to validate and select the installed release")
+        if old is not None:
+            try:
+                old_ready = verify_ref(root, old["current"], development)
+                old_manifest, _ = load_manifest(Path(old["current"]["release_path"]) / "manifest.json",
+                                                old["current"]["agentbox_version"], development)
+                old_platform, old_artifacts = selected_platform(old_manifest)
+                new_platform, new_artifacts = selected_platform(manifest)
+                if old_platform == new_platform:
+                    reusable = {name for name in old_ready
+                                if tool_reuse_identity(old_manifest, name, old_artifacts[name])
+                                == tool_reuse_identity(manifest, name, new_artifacts[name])}
+                    reusable_release = Path(old["current"]["release_path"])
+                    reuse_identities = {name: agent_content_identity(reusable_release, name) for name in reusable}
+            except (StateError, OSError):
+                reusable = set()
+                reuse_identities = {}
+                reusable_release = None
+        desired = requested | reusable
+        scope = "all" if desired == {"claude", "codex"} else next(iter(desired))
+        release_id = f"{manifest['agentbox_version']}-{digest[:16]}-{scope}"
         release = root / "releases" / release_id
         quarantine: Path | None = None
         if release.exists():
@@ -560,7 +622,9 @@ def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str
                 existing, existing_hash = load_manifest(release / "manifest.json", expected_version, development)
                 if existing_hash != digest or canonical_bytes(existing) != canonical_bytes(manifest):
                     fail("an immutable release directory has conflicting content")
-                content_hash, validation_hash = verify_release_content(release, digest, manifest["runtime"]["image"])
+                content_hash, validation_hash, ready_agents = verify_release_content(release, digest, manifest["runtime"]["image"])
+                if not desired <= ready_agents:
+                    fail("immutable release is missing requested agent content")
             except (StateError, OSError):
                 quarantine = root / "staging" / f"repair-{release_id}-{uuid.uuid4().hex}"
                 os.replace(release, quarantine)
@@ -570,7 +634,7 @@ def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str
                 platform_name, _ = selected_platform(manifest)
                 if development: run_checked([str(engine), "image", "inspect", image])
                 else: run_checked([str(engine), "pull", image])
-                validate_release(engine, image, platform_name, release, manifest)
+                validate_release(engine, image, platform_name, release, manifest, scope)
                 activate(root, manifest, digest, release, content_hash, validation_hash, development, reset_selector); return
         staging = Path(tempfile.mkdtemp(prefix=f"{release_id}.", dir=root / "staging"))
         os.chmod(staging, 0o700)
@@ -583,20 +647,37 @@ def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str
             else: run_checked([str(engine), "pull", image])
             platform_name, artifacts = selected_platform(manifest)
             downloads = staging / "downloads"; downloads.mkdir(mode=0o700)
-            download_artifact(artifacts["claude"], downloads / "claude", expected_version)
-            download_artifact(artifacts["codex"], downloads / "codex.tar.gz", expected_version)
+            reused = desired & reusable
+            reuse_path: Path | None = None
+            if reused and reusable_release is not None:
+                reuse_path = staging / "reuse"
+                reuse_path.mkdir(mode=0o700)
+                for name in sorted(reused):
+                    # Preserve any raced-in symlink so the runtime inventory
+                    # rejects it instead of following it into user content.
+                    shutil.copytree(reusable_release / "vendor" / name, reuse_path / name, symlinks=True)
+            if "claude" in desired and "claude" not in reused:
+                download_artifact(artifacts["claude"], downloads / "claude", expected_version)
+            if "codex" in desired and "codex" not in reused:
+                download_artifact(artifacts["codex"], downloads / "codex.tar.gz", expected_version)
             prepare_name = f"agentbox-prepare-{uuid.uuid4().hex}"
             prepare_raw = run_checked([str(engine), "run", "--rm", *candidate_limits(prepare_name), "--network", "none", "--read-only", "--tmpfs", candidate_tmpfs("/tmp", "16m"),
                                        "--tmpfs", candidate_tmpfs("/home/node", "64m", executable=True), "--mount", f"type=bind,src={staging},dst=/opt/agentbox-release", image,
                                        "prepare", "--protocol", "1", "--platform", platform_name, "--manifest", "/opt/agentbox-release/manifest.json",
-                                       "--downloads", "/opt/agentbox-release/downloads", "--output", "/opt/agentbox-release/vendor"],
+                                       "--agent", scope, "--downloads", "/opt/agentbox-release/downloads", "--output", "/opt/agentbox-release/vendor",
+                                       *(["--reuse", "/opt/agentbox-release/reuse"] if reuse_path is not None else [])],
                                       capture=True, timeout=180, cleanup=(engine, prepare_name))
             prepare_result = protocol_json(prepare_raw, {"content_sha256", "ok", "protocol"}, "runtime prepare result")
             if prepare_result["ok"] is not True or prepare_result["protocol"] != 1:
                 fail("runtime prepare result was unsuccessful")
             sha256(string(prepare_result["content_sha256"], "runtime prepare content_sha256").removeprefix("sha256:"), "runtime prepare content_sha256")
-            assertions = validate_release(engine, image, platform_name, staging, manifest)
+            verify_content_ledger(staging, digest)
+            for name in reused:
+                if agent_content_identity(staging, name) != reuse_identities[name]:
+                    fail(f"reused {name} content changed while creating the enriched release")
+            assertions = validate_release(engine, image, platform_name, staging, manifest, scope)
             shutil.rmtree(downloads)
+            if reuse_path is not None: shutil.rmtree(reuse_path)
             if file_hash(manifest_out) != digest:
                 fail("runtime modified the immutable release manifest")
             content_hash, validation_hash = create_validation_receipt(staging, manifest, digest, image, platform_name, prepare_result, assertions)
@@ -613,7 +694,8 @@ def prepare(root: Path, manifest_path: Path, engine: Path, expected_version: str
             if staging.exists(): shutil.rmtree(staging, ignore_errors=True)
         if quarantine is not None and quarantine.exists(): shutil.rmtree(quarantine, ignore_errors=True)
 
-def inspect(root: Path, manifest_path: Path | None, expected_version: str, development: bool = False) -> dict[str, Any]:
+def inspect(root: Path, manifest_path: Path | None, expected_version: str, development: bool = False,
+            agent: str = "all") -> dict[str, Any]:
     result: dict[str, Any] = {"schema_version": STATE_SCHEMA, "development": development, "state": "absent", "current": None, "previous": None}
     installed_hash = None
     if manifest_path is not None:
@@ -623,8 +705,11 @@ def inspect(root: Path, manifest_path: Path | None, expected_version: str, devel
                                "claude_version": manifest["tools"]["claude"]["version"], "codex_version": manifest["tools"]["codex"]["version"]}
     record = load_activation(root, development)
     if record is None: return result
-    verify_ref(root, record["current"], development)
-    result.update({"state": "ready", "generation": record["generation"], "current": record["current"], "previous": record["previous"], "selection": record["selection"]})
+    ready_agents = verify_ref(root, record["current"], development)
+    requested = {"claude", "codex"} if agent == "all" else {agent}
+    result.update({"state": "ready" if requested <= ready_agents else "partial", "ready_agents": sorted(ready_agents),
+                   "generation": record["generation"], "current": record["current"], "previous": record["previous"],
+                   "selection": record["selection"]})
     if record["selection"]["mode"] == "manual_rollback_hold":
         result["state"] = "manual-rollback-hold"
     elif installed_hash is not None and record["current"]["manifest_sha256"] != installed_hash:
@@ -653,11 +738,12 @@ def main() -> int:
     parser.add_argument("--expected-version", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="command", required=True)
     validate = sub.add_parser("validate-manifest"); validate.add_argument("manifest", type=Path)
-    show = sub.add_parser("inspect"); show.add_argument("--root", required=True, type=Path); show.add_argument("--manifest", type=Path)
+    show = sub.add_parser("inspect"); show.add_argument("--root", required=True, type=Path); show.add_argument("--manifest", type=Path); show.add_argument("--agent", choices=("claude", "codex", "all"), default="all")
     current = sub.add_parser("current-field"); current.add_argument("--root", required=True, type=Path); current.add_argument("field", choices=("release_path", "runtime_image", "manifest_sha256", "agentbox_version"))
-    plan = sub.add_parser("launch-plan"); plan.add_argument("--root", required=True, type=Path)
+    plan = sub.add_parser("launch-plan"); plan.add_argument("--root", required=True, type=Path); plan.add_argument("--agent", choices=("claude", "codex", "all"), default="all")
     prep = sub.add_parser("prepare"); prep.add_argument("--root", required=True, type=Path); prep.add_argument("--manifest", required=True, type=Path); prep.add_argument("--engine", required=True, type=Path)
     prep.add_argument("--reset-selector", action="store_true")
+    prep.add_argument("--agent", choices=("claude", "codex", "all"), default="all")
     rollback_parser = sub.add_parser("rollback"); rollback_parser.add_argument("--root", required=True, type=Path); rollback_parser.add_argument("--accept-vendor-state-risk", action="store_true")
     locked = sub.add_parser("exec-locked"); locked.add_argument("--root", required=True, type=Path); locked.add_argument("argv", nargs=argparse.REMAINDER)
     execute = sub.add_parser("exec-engine"); execute.add_argument("argv", nargs=argparse.REMAINDER)
@@ -669,7 +755,7 @@ def main() -> int:
             fail("a valid --expected-version is required for state and manifest operations")
     if args.command == "validate-manifest":
         manifest, digest = load_manifest(args.manifest, args.expected_version, args.development); print(json.dumps({"agentbox_version": manifest["agentbox_version"], "manifest_sha256": digest}, sort_keys=True))
-    elif args.command == "inspect": print(json.dumps(inspect(args.root, args.manifest, args.expected_version, args.development), sort_keys=True))
+    elif args.command == "inspect": print(json.dumps(inspect(args.root, args.manifest, args.expected_version, args.development, args.agent), sort_keys=True))
     elif args.command == "current-field":
         record = load_activation(args.root, args.development)
         if record is None: fail("Agentbox has not been set up")
@@ -677,11 +763,13 @@ def main() -> int:
     elif args.command == "launch-plan":
         record = load_activation(args.root, args.development)
         if record is None: fail("Agentbox has not been set up")
-        verify_ref(args.root, record["current"], args.development)
+        ready_agents = verify_ref(args.root, record["current"], args.development)
+        requested = {"claude", "codex"} if args.agent == "all" else {args.agent}
+        if not requested <= ready_agents: fail(f"active release is not prepared for {args.agent}")
         print(json.dumps({"generation": record["generation"], "runtime_root": str(args.root), "current": record["current"]}, sort_keys=True))
     elif args.command == "prepare":
         if not args.root.is_absolute() or not args.manifest.is_absolute() or not args.engine.is_absolute(): fail("prepare paths must be absolute")
-        prepare(args.root, args.manifest, args.engine, args.expected_version, args.development, args.reset_selector)
+        prepare(args.root, args.manifest, args.engine, args.expected_version, args.development, args.reset_selector, args.agent)
     elif args.command == "rollback":
         if not args.accept_vendor_state_risk: fail("rollback requires --accept-vendor-state-risk")
         print(json.dumps(rollback(args.root, args.development), sort_keys=True))

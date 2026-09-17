@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -325,17 +326,30 @@ def command_prepare(args: argparse.Namespace) -> int:
     contract = manifest_contract(manifest, args.platform)
     downloads = Path(args.downloads)
     output = Path(args.output)
-    ensure_plain_file(downloads / "claude", "Claude download")
-    ensure_plain_file(downloads / "codex.tar.gz", "Codex download")
-    verify_download(downloads / "claude", contract["claude"], "Claude download")
-    verify_download(downloads / "codex.tar.gz", contract["codex"], "Codex download")
+    requested = {"claude", "codex"} if args.agent == "all" else {args.agent}
+    reuse = Path(args.reuse) if args.reuse else None
     if output.exists():
         fail("candidate output must not already exist")
     output.mkdir(mode=0o700)
-    (output / "claude").mkdir(mode=0o755)
-    with (downloads / "claude").open("rb") as source:
-        write_regular(source, output / "claude" / "claude", True)
-    extract_codex(downloads / "codex.tar.gz", output / "codex", contract["codex"]["allowed_members"])
+    for agent in sorted(requested):
+        reused = reuse / agent if reuse is not None else None
+        if reused is not None and reused.exists():
+            if reused.is_symlink() or not reused.is_dir():
+                fail(f"reused {agent} content must be a plain directory")
+            # Preserve any raced-in symlink so inventory rejects it; never
+            # follow a reused candidate link into host-owned content.
+            shutil.copytree(reused, output / agent, symlinks=True)
+            continue
+        if agent == "claude":
+            ensure_plain_file(downloads / "claude", "Claude download")
+            verify_download(downloads / "claude", contract["claude"], "Claude download")
+            (output / "claude").mkdir(mode=0o755)
+            with (downloads / "claude").open("rb") as source:
+                write_regular(source, output / "claude" / "claude", True)
+        else:
+            ensure_plain_file(downloads / "codex.tar.gz", "Codex download")
+            verify_download(downloads / "codex.tar.gz", contract["codex"], "Codex download")
+            extract_codex(downloads / "codex.tar.gz", output / "codex", contract["codex"]["allowed_members"])
     content = inventory(output)
     content["manifest_sha256"] = "sha256:" + hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
     content["platform"] = args.platform
@@ -394,9 +408,10 @@ def image_file_matches(manifest: dict, logical_name: str, path: Path) -> bool:
 
 
 def candidate_root(path: Path) -> Path:
-    if (path / "claude" / "claude").is_file():
+    if (path / "claude" / "claude").is_file() or (path / "codex" / "bin" / "codex").is_file():
         return path
-    if (path / "vendor" / "claude" / "claude").is_file():
+    if ((path / "vendor" / "claude" / "claude").is_file()
+            or (path / "vendor" / "codex" / "bin" / "codex").is_file()):
         return path / "vendor"
     return path
 
@@ -469,7 +484,12 @@ def command_validate(args: argparse.Namespace) -> int:
         "runtime_protocol": args.protocol == PROTOCOL,
         "status_line": image_file_matches(manifest, "statusline", share / "statusline.sh"),
     }
-    ok = all(assertions.values())
+    required = {"instructions", "runtime_protocol", "status_line"}
+    if args.agent in {"claude", "all"}:
+        required |= {"claude_behavior", "claude_version"}
+    if args.agent in {"codex", "all"}:
+        required |= {"codex_behavior", "codex_layout", "codex_version"}
+    ok = all(assertions[name] for name in required)
     result = {
         "assertions": assertions,
         "claude_version": contract["claude"]["version"] if claude_version_ok else None,
@@ -600,9 +620,11 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--protocol", type=int, required=True)
         command.add_argument("--platform", required=True, choices=sorted(PLATFORMS))
         command.add_argument("--manifest", required=True)
+        command.add_argument("--agent", choices=("claude", "codex", "all"), default="all")
         if name == "prepare":
             command.add_argument("--downloads", required=True)
             command.add_argument("--output", required=True)
+            command.add_argument("--reuse")
         else:
             command.add_argument("--candidate", required=True)
     run = commands.add_parser("run")

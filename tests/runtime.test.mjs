@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { AGENTBOX_VERSION, canonical, sha256 } from "./fixtures.mjs";
@@ -235,6 +235,38 @@ test("prepare verifies bytes, safely extracts, and emits canonical content", (t)
   assert.match(output.content_sha256, /^sha256:[0-9a-f]{64}$/);
   assert.equal(readFileSync(resolve(candidate, "codex", "codex-package.json"), "utf8"), "{}\n");
   assert.equal(readFileSync(resolve(candidate, "content.json"), "utf8").endsWith("\n"), true);
+});
+
+test("prepare and validate honor agent scope and can enrich from verified content", (t) => {
+  const fixture = makeProtocolFixture(t);
+  const claudeOnly = resolve(fixture.dir, "claude-only");
+  expectExit(runtime([
+    "prepare", "--protocol", "1", "--platform", "linux/arm64", "--agent", "claude",
+    "--manifest", fixture.manifest, "--downloads", fixture.downloads, "--output", claudeOnly,
+  ]), 0, "Claude-only prepare");
+  assert.ok(existsSync(resolve(claudeOnly, "claude/claude")));
+  assert.equal(existsSync(resolve(claudeOnly, "codex")), false);
+  expectExit(runtime([
+    "validate", "--protocol", "1", "--platform", "linux/arm64", "--agent", "claude",
+    "--manifest", fixture.manifest, "--candidate", claudeOnly,
+  ], { env: { AGENTBOX_INTERNAL_TESTING: "1", AGENTBOX_TEST_SHARE_ROOT: SHARE } }), 0, "Claude-only validate");
+  expectExit(runtime([
+    "validate", "--protocol", "1", "--platform", "linux/arm64", "--agent", "codex",
+    "--manifest", fixture.manifest, "--candidate", claudeOnly,
+  ], { env: { AGENTBOX_INTERNAL_TESTING: "1", AGENTBOX_TEST_SHARE_ROOT: SHARE } }), 1, "missing Codex validate");
+
+  unlinkSync(resolve(fixture.downloads, "claude"));
+  const enriched = resolve(fixture.dir, "enriched");
+  expectExit(runtime([
+    "prepare", "--protocol", "1", "--platform", "linux/arm64", "--agent", "all",
+    "--manifest", fixture.manifest, "--downloads", fixture.downloads, "--reuse", claudeOnly,
+    "--output", enriched,
+  ]), 0, "enriched prepare");
+  assert.deepEqual(
+    readFileSync(resolve(enriched, "claude/claude")),
+    readFileSync(resolve(claudeOnly, "claude/claude")),
+  );
+  assert.ok(existsSync(resolve(enriched, "codex/bin/codex")));
 });
 
 test("prepare rejects a digest mismatch without publishing output", (t) => {

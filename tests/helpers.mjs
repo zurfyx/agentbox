@@ -70,12 +70,17 @@ export function writeProtocolEngine(
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${logPath}'
 if [ "$1" = pull ]; then exit 0; fi
+if [ "$1" = version ]; then exit 0; fi
 if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
 mount_source=
 platform=
+agent=all
+reuse=
 previous=
 for argument in "$@"; do
   if [ "$previous" = --platform ]; then platform="$argument"; fi
+  if [ "$previous" = --agent ]; then agent="$argument"; fi
+  if [ "$previous" = --reuse ]; then reuse="$argument"; fi
   previous="$argument"
   case "$argument" in
     type=bind,src=*,dst=/opt/agentbox-release*)
@@ -85,8 +90,11 @@ for argument in "$@"; do
 done
 case " $* " in
   *" prepare --protocol "*)
+    reuse_args=
+    if [ -n "$reuse" ]; then reuse_args="--reuse $mount_source/reuse"; fi
     exec env AGENTBOX_INTERNAL_TESTING=1 AGENTBOX_TEST_SHARE_ROOT='${share}' \
       '${PYTHON}' '${runtime}' prepare --protocol 1 --platform "$platform" \
+      --agent "$agent" $reuse_args \
       --manifest "$mount_source/manifest.json" --downloads "$mount_source/downloads" \
       --output "$mount_source/vendor"
     ;;
@@ -94,6 +102,7 @@ case " $* " in
     ${failValidate ? "exit 23" : ""}
     exec env AGENTBOX_INTERNAL_TESTING=1 AGENTBOX_TEST_SHARE_ROOT='${share}' \
       '${PYTHON}' '${runtime}' validate --protocol 1 --platform "$platform" \
+      --agent "$agent" \
       --manifest "$mount_source/manifest.json" --candidate "$mount_source/vendor"
     ;;
   *" run --protocol 1 --mode "*) exit ${runExit} ;;

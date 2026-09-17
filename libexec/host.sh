@@ -228,16 +228,16 @@ run_state() {
 }
 
 setup_release() {
-  local reset_selector="${1:-}" manifest engine home root
+  local reset_selector="${1:-}" agent="${2:-all}" manifest engine home root
   manifest="$(resolve_manifest)" || return
   engine="$(resolve_engine)" || return
   home="$(account_home)" || return
   root="$(runtime_root "$home")"
   run_state validate-manifest "$manifest" > /dev/null || return
   if [[ $reset_selector == --reset-selector ]]; then
-    run_state prepare --reset-selector --root "$root" --manifest "$manifest" --engine "$engine" || return
+    run_state prepare --reset-selector --agent "$agent" --root "$root" --manifest "$manifest" --engine "$engine" || return
   else
-    run_state prepare --root "$root" --manifest "$manifest" --engine "$engine" || return
+    run_state prepare --agent "$agent" --root "$root" --manifest "$manifest" --engine "$engine" || return
   fi
   printf 'Agentbox %s is prepared.\n' "$AGENTBOX_VERSION"
 }
@@ -270,7 +270,7 @@ info_command() {
 }
 
 doctor_command() {
-  local option="${1:-}" manifest python home root engine="" state state_name=invalid engine_status=unavailable image_status=not-prepared status=0 image=""
+  local option="${1:-}" manifest python home root engine="" state state_name=invalid ready_agents='[]' engine_status=unavailable image_status=not-prepared status=0 image=""
   [[ -z $option || $option == --json ]] || {
     printf 'usage: agentbox doctor [--json]\n' >&2
     return 64
@@ -284,7 +284,8 @@ doctor_command() {
     status=1
   fi
   state_name="$("$python" -I -c 'import json,sys;print(json.loads(sys.argv[1])["state"])' "$state")"
-  [[ $state_name == ready || $state_name == manual-rollback-hold ]] || status=1
+  ready_agents="$("$python" -I -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1]).get("ready_agents",[]),separators=(",",":")))' "$state")"
+  [[ $state_name == ready || $state_name == partial || $state_name == manual-rollback-hold ]] || status=1
   if engine="$(resolve_engine 2> /dev/null)" && env -i PATH=/usr/bin:/bin HOME=/var/empty LC_ALL=C "$engine" version > /dev/null 2>&1; then
     engine_status=ok
     if image="$(run_state current-field --root "$root" runtime_image 2> /dev/null)"; then
@@ -297,10 +298,12 @@ doctor_command() {
     status=1
   fi
   if [[ $option == --json ]]; then
-    "$python" -I -c 'import json,sys;print(json.dumps({"agentbox_version":sys.argv[1],"state":json.loads(sys.argv[2])["state"],"engine":sys.argv[3],"image":sys.argv[4]},sort_keys=True))' "$AGENTBOX_VERSION" "$state" "$engine_status" "$image_status"
+    "$python" -I -c 'import json,sys;print(json.dumps({"agentbox_version":sys.argv[1],"state":json.loads(sys.argv[2])["state"],"ready_agents":json.loads(sys.argv[3]),"engine":sys.argv[4],"image":sys.argv[5]},sort_keys=True))' "$AGENTBOX_VERSION" "$state" "$ready_agents" "$engine_status" "$image_status"
   else
     printf 'manifest: ok\nstate: '
     "$python" -I -c 'import json,sys;print(json.loads(sys.argv[1])["state"])' "$state"
+    printf 'ready agents: '
+    "$python" -I -c 'import json,sys;v=json.loads(sys.argv[1]);print(", ".join(v) if v else "none")' "$ready_agents"
     printf 'engine: %s\nimage: %s\n' "$engine_status" "$image_status"
   fi
   return "$status"
@@ -340,12 +343,17 @@ launch_agent() {
   reject_browser_login "$mode" "$@" || return
   reject_vendor_update "$mode" "$@" || return
   local manifest="" engine python home root physical_root release image plan plan_fields cwd gh_token="${GH_TOKEN:-}" user_name state gh
-  local prior_hash="" after_state="" after_hash="" prepare_status=0 reconciliation_failed=0
+  local requested_agent="$mode" prior_release="" after_state="" after_release="" prepare_status=0 reconciliation_failed=0
+  [[ $requested_agent == clauded ]] && requested_agent=claude
   python="$(resolve_python)" || return
   home="$(account_home)" || return
   root="$(runtime_root "$home")"
   if [[ $no_update == 1 ]]; then
-    state="$(run_state inspect --root "$root" 2> /dev/null || true)"
+    state="$(run_state inspect --agent "$requested_agent" --root "$root" 2> /dev/null || true)"
+    if [[ -n $state ]] && "$python" -I -c 'import json,sys;s=json.loads(sys.argv[1]);raise SystemExit(0 if s["state"]=="manual-rollback-hold" and sys.argv[2] not in s.get("ready_agents",[]) else 1)' "$state" "$requested_agent"; then
+      printf 'agentbox: manual rollback hold is active and the held release is not prepared for %s; run `agentbox setup --reset-selector` to validate and select the installed release\n' "$requested_agent" >&2
+      return 69
+    fi
     if [[ -z $state ]] || ! "$python" -I -c 'import json,sys;raise SystemExit(0 if json.loads(sys.argv[1])["state"] in ("ready","manual-rollback-hold") else 1)' "$state"; then
       printf 'agentbox: --no-update requires an existing valid active release; run `agentbox setup` first\n' >&2
       return 69
@@ -353,22 +361,26 @@ launch_agent() {
   else
     manifest="$(resolve_manifest)" || return
     run_state validate-manifest "$manifest" > /dev/null
-    state="$(run_state inspect --root "$root" --manifest "$manifest" 2> /dev/null || true)"
+    state="$(run_state inspect --agent "$requested_agent" --root "$root" --manifest "$manifest" 2> /dev/null || true)"
     if [[ -n $state ]]; then
-      prior_hash="$("$python" -I -c 'import json,sys;v=json.loads(sys.argv[1]);print((v.get("current") or {}).get("manifest_sha256", ""))' "$state")"
+      prior_release="$("$python" -I -c 'import json,sys;v=json.loads(sys.argv[1]);print((v.get("current") or {}).get("release_id", ""))' "$state")"
+    fi
+    if [[ -n $state ]] && "$python" -I -c 'import json,sys;s=json.loads(sys.argv[1]);raise SystemExit(0 if s["state"]=="manual-rollback-hold" and sys.argv[2] not in s.get("ready_agents",[]) else 1)' "$state" "$requested_agent"; then
+      printf 'agentbox: manual rollback hold is active and the held release is not prepared for %s; run `agentbox setup --reset-selector` to validate and select the installed release\n' "$requested_agent" >&2
+      return 69
     fi
     if [[ -z $state ]] || ! "$python" -I -c 'import json,sys;raise SystemExit(0 if json.loads(sys.argv[1])["state"] in ("ready","manual-rollback-hold") else 1)' "$state"; then
-      if setup_release >&2; then
+      if setup_release "" "$requested_agent" >&2; then
         :
       else
         prepare_status=$?
-        if [[ -n $prior_hash ]]; then
-          after_state="$(run_state inspect --root "$root" 2> /dev/null || true)"
+        if [[ -n $prior_release ]]; then
+          after_state="$(run_state inspect --agent "$requested_agent" --root "$root" 2> /dev/null || true)"
           if [[ -n $after_state ]]; then
-            after_hash="$("$python" -I -c 'import json,sys;v=json.loads(sys.argv[1]);print((v.get("current") or {}).get("manifest_sha256", ""))' "$after_state")"
+            after_release="$("$python" -I -c 'import json,sys;v=json.loads(sys.argv[1]);print((v.get("current") or {}).get("release_id", ""))' "$after_state")"
           fi
         fi
-        if [[ -n $prior_hash && $after_hash == "$prior_hash" ]]; then
+        if [[ -n $prior_release && $after_release == "$prior_release" ]] && "$python" -I -c 'import json,sys;raise SystemExit(0 if json.loads(sys.argv[1])["state"] in ("ready","manual-rollback-hold") else 1)' "$after_state"; then
           printf 'agentbox: warning: installed release preparation failed; running unchanged active release\n' >&2
           reconciliation_failed=1
         else
@@ -378,23 +390,27 @@ launch_agent() {
     fi
   fi
   engine="$(resolve_engine)" || return
-  plan="$(run_state launch-plan --root "$root")" || return
+  plan="$(run_state launch-plan --agent "$requested_agent" --root "$root")" || return
   plan_fields="$("$python" -I -c 'import json,sys;p=json.loads(sys.argv[1]);v=p["current"];print(v["release_path"]+"\t"+v["runtime_image"]+"\t"+p["runtime_root"])' "$plan")"
   release="${plan_fields%%$'\t'*}"
   plan_fields="${plan_fields#*$'\t'}"
   image="${plan_fields%%$'\t'*}"
   physical_root="${plan_fields#*$'\t'}"
+  if [[ $no_update == 1 ]] && ! env -i PATH=/usr/bin:/bin HOME=/var/empty LC_ALL=C "$engine" version > /dev/null 2>&1; then
+    printf 'agentbox: Docker Desktop is unavailable; start Docker Desktop and retry the same command\n' >&2
+    return 69
+  fi
   if ! env -i PATH=/usr/bin:/bin HOME=/var/empty LC_ALL=C "$engine" image inspect "$image" > /dev/null 2>&1; then
     if [[ $no_update == 1 ]]; then
-      printf 'agentbox: --no-update active runtime image is unavailable; run `agentbox setup`\n' >&2
+      printf 'agentbox: --no-update active runtime image is missing; retry the same command without `--no-update`\n' >&2
       return 69
     fi
     if [[ $reconciliation_failed == 1 ]]; then
       printf 'agentbox: unchanged active fallback image is unavailable; retry `agentbox setup`\n' >&2
       return 69
     fi
-    setup_release >&2
-    plan="$(run_state launch-plan --root "$root")" || return
+    setup_release "" "$requested_agent" >&2
+    plan="$(run_state launch-plan --agent "$requested_agent" --root "$root")" || return
     plan_fields="$("$python" -I -c 'import json,sys;p=json.loads(sys.argv[1]);v=p["current"];print(v["release_path"]+"\t"+v["runtime_image"]+"\t"+p["runtime_root"])' "$plan")"
     release="${plan_fields%%$'\t'*}"
     plan_fields="${plan_fields#*$'\t'}"
@@ -476,7 +492,7 @@ main() {
         printf 'usage: agentbox setup [--reset-selector]\n' >&2
         return 64
       }
-      setup_release "${1:-}"
+      setup_release "${1:-}" all
       return
       ;;
     update)

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   cpSync,
   mkdirSync,
   readFileSync,
@@ -434,6 +435,8 @@ test("renderer coherently and deterministically injects one derived version", (t
     "renderer fixture git commit",
   );
   const head = run("git", ["rev-parse", "HEAD"], { cwd: tree }).stdout.trim();
+  writeFileSync(resolve(tree, "docs/.secret"), "must not ship\n");
+  writeFileSync(resolve(tree, "docs/draft.md"), "# Untracked draft\n");
   const fakeBin = resolve(dir, "bin");
   mkdirSync(fakeBin);
   writeExecutable(
@@ -482,6 +485,7 @@ with open(output, "wb") as raw:
     `sha256:${"3".repeat(64)}`,
   ];
   for (const output of ["dist-a", "dist-b"]) {
+    chmodSync(resolve(tree, "docs"), output === "dist-a" ? 0o700 : 0o755);
     const result = run(
       "bash",
       [
@@ -525,7 +529,8 @@ with open(output, "wb") as raw:
         " root=archive.extractfile(sys.argv[2]).read().decode()",
         " share=archive.extractfile(sys.argv[3]).read().decode()",
         " manifest=json.load(archive.extractfile(sys.argv[4]))",
-        "print(json.dumps({'names':names,'root':root,'share':share,'manifest':manifest},sort_keys=True))",
+        " modes={name:archive.getmember(name).mode for name in names}",
+        "print(json.dumps({'names':names,'root':root,'share':share,'manifest':manifest,'modes':modes},sort_keys=True))",
       ].join("\n"),
       resolve(dir, "dist-a", asset),
       `agentbox-${version}/VERSION`,
@@ -542,6 +547,22 @@ with open(output, "wb") as raw:
     rendered.manifest.runtime.image,
     `ghcr.io/zurfyx/agentbox-runtime@sha256:${"1".repeat(64)}`,
   );
+  const docsRoot = `agentbox-${version}/docs`;
+  assert.deepEqual(
+    rendered.names.filter((name) => name === docsRoot || name.startsWith(`${docsRoot}/`)),
+    [
+      docsRoot,
+      `${docsRoot}/development.md`,
+      `${docsRoot}/release.md`,
+      `${docsRoot}/security.md`,
+      `${docsRoot}/usage.md`,
+    ],
+    "only the explicit documentation allowlist may ship",
+  );
+  assert.equal(rendered.modes[docsRoot], 0o755);
+  for (const name of rendered.names.filter((name) => name.startsWith(`${docsRoot}/`))) {
+    assert.equal(rendered.modes[name], 0o444, `${name} must have a normalized mode`);
+  }
   const provenance = JSON.parse(
     readFileSync(resolve(dir, "dist-a", `agentbox-${version}.provenance.json`)),
   );
@@ -968,21 +989,25 @@ test("workflow revalidates canonical draft assets at every registry mutation bou
 
 test("release runbook documents safe rollout, recovery, and durable verification", () => {
   const readme = readFileSync(resolve(ROOT, "README.md"), "utf8");
-  const runbook = readme.slice(readme.indexOf("### Release rollout and recovery runbook"));
-  assert.match(runbook, /enable \*\*Immutable releases\*\*/);
+  assert.doesNotMatch(readme, /Release rollout and recovery runbook/);
+  const releaseDocs = readFileSync(resolve(ROOT, "docs/release.md"), "utf8");
+  const runbook = releaseDocs.slice(releaseDocs.indexOf("## Current publishing runbook"));
+  assert.match(runbook, /\*\*Immutable releases\*\* is enabled/);
   assert.match(runbook, /AGENTBOX_APP_ID/);
   assert.match(runbook, /AGENTBOX_APP_PRIVATE_KEY/);
-  assert.match(runbook, /protected `main` requires/);
-  assert.match(runbook, /rollout commit must become `v0\.1\.1`/);
-  assert.match(runbook, /no-input recovery wakeup[\s\S]{0,100}`noop` plan/);
+  assert.match(runbook, /Protected `main` requires/);
+  assert.match(runbook, /derives the next patch version/);
+  assert.match(runbook, /normal recovery is a no-input dispatch/);
   assert.match(runbook, /recovery_source_commit=/);
   assert.match(runbook, /cannot skip an older eligible commit/);
   assert.match(runbook, /replace_unpublished_image=true/);
-  assert.match(runbook, /repairs or resumes the App-owned tap proposal[\s\S]{0,120}dispatch the requested recovery again/);
+  assert.match(runbook, /repairs or resumes the App-owned tap proposal first;[\s\S]{0,120}dispatch the requested recovery again/);
+  assert.match(runbook, /VERSION:\?set VERSION to the actual published version/);
   assert.match(runbook, /\.immutable == true/);
   assert.match(runbook, /\.runtime_image \| test\("@sha256:/);
   assert.match(runbook, /git\/ref\/tags\/v\$version/);
   assert.match(runbook, /homebrew-tap\/contents\/Formula\/agentbox\.rb/);
+  assert.doesNotMatch(runbook, /v0\.1\.[12]\b|must become `v/);
 });
 
 test("workflow files are valid YAML", () => {

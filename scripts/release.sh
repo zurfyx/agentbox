@@ -118,6 +118,12 @@ jq -e '
   ([.tools.codex.platforms[].platform] | sort == ["linux/amd64", "linux/arm64"])
 ' "$input" > /dev/null || die "release inputs do not match schema 1"
 
+packaged_docs=(
+  docs/usage.md
+  docs/security.md
+  docs/development.md
+  docs/release.md
+)
 required_files=(
   VERSION
   Dockerfile
@@ -132,6 +138,7 @@ required_files=(
   README.md
   LICENSE
   THIRD_PARTY_NOTICES.md
+  "${packaged_docs[@]}"
 )
 for path in "${required_files[@]}"; do
   [[ -f $source_root/$path ]] || die "required source file is missing: $path"
@@ -168,6 +175,11 @@ if [[ $dry_run == false ]]; then
   [[ -n $index_digest && -n $amd64_digest && -n $arm64_digest ]] ||
     die "publication requires the index and both child digests"
   [[ "$(git -C "$source_root" rev-parse HEAD)" == "$source_commit" ]] || die "source commit is not checked out"
+  for path in "${packaged_docs[@]}"; do
+    [[ ! -L $source_root/$path ]] || die "packaged documentation must not be a symlink: $path"
+    git -C "$source_root" ls-files --error-unmatch -- "$path" > /dev/null 2>&1 ||
+      die "packaged documentation is not tracked: $path"
+  done
   git -C "$source_root" diff --quiet --ignore-submodules -- || die "tracked source changes are not releasable"
   git -C "$source_root" diff --cached --quiet --ignore-submodules -- || die "staged source changes are not releasable"
 fi
@@ -175,7 +187,7 @@ fi
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/agentbox-release.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT
 root="$tmp_dir/agentbox-$version"
-mkdir -p "$root/bin" "$root/libexec" "$root/completions" "$root/share/agentbox"
+install -d -m 0755 "$root" "$root/bin" "$root/libexec" "$root/completions" "$root/docs" "$root/share" "$root/share/agentbox"
 
 printf '%s\n' "$version" > "$root/VERSION"
 chmod 0444 "$root/VERSION"
@@ -187,6 +199,9 @@ install -m 0444 "$source_root/completions/_agentbox" "$root/completions/_agentbo
 install -m 0444 "$source_root/completions/agentbox.fish" "$root/completions/agentbox.fish"
 install -m 0555 "$source_root/setup-host-bridge.sh" "$root/setup-host-bridge.sh"
 install -m 0444 "$source_root/README.md" "$root/README.md"
+for path in "${packaged_docs[@]}"; do
+  install -m 0444 "$source_root/$path" "$root/$path"
+done
 install -m 0444 "$source_root/LICENSE" "$root/LICENSE"
 install -m 0444 "$source_root/THIRD_PARTY_NOTICES.md" "$root/THIRD_PARTY_NOTICES.md"
 printf '%s\n' "$version" > "$root/share/agentbox/VERSION"
