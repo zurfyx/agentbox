@@ -17,6 +17,8 @@ import {
 } from "./helpers.mjs";
 
 const INSPECTOR = resolve(ROOT, "scripts/inspect-codex-package.py");
+// The nested 197-test gate takes about 125 seconds on protected Intel macOS.
+const NESTED_FULL_GATE_TIMEOUT_MS = 240_000;
 const VERSION = "0.154.0";
 const TARGET = "aarch64-unknown-linux-musl";
 const METADATA = JSON.stringify({
@@ -253,7 +255,7 @@ esac
         AGENTBOX_SKIP_NESTED_GATE: "1",
         NODE_TEST_CONTEXT: null,
       },
-      timeout: 120_000,
+      timeout: NESTED_FULL_GATE_TIMEOUT_MS,
     });
     expectExit(gate, 0, "bumped-tree full gate");
     assert.match(gate.stdout + gate.stderr, /ℹ tests \d+/);
