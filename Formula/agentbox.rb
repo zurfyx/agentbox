@@ -22,6 +22,12 @@ class Agentbox < Formula
     fish_completion.install "completions/agentbox.fish"
 
     pkgshare.install "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"
+    (pkgshare/"docs").install(
+      "docs/development.md",
+      "docs/release.md",
+      "docs/security.md",
+      "docs/usage.md",
+    )
   end
 
   test do
@@ -30,6 +36,10 @@ class Agentbox < Formula
     assert_predicate bin/"agentbox-host-bridge", :executable?
     assert_match "usage: agentbox-host-bridge", shell_output("#{bin}/agentbox-host-bridge --help")
     assert_match "agentbox #{version}", shell_output("#{bin}/agentbox --version")
+    assert_predicate pkgshare/"docs/usage.md", :file?
+    assert_predicate pkgshare/"docs/security.md", :file?
+    assert_predicate pkgshare/"docs/development.md", :file?
+    assert_predicate pkgshare/"docs/release.md", :file?
     if (HOMEBREW_PREFIX/"bin/agentbox").symlink?
       assert_match "agentbox #{version}", shell_output("#{HOMEBREW_PREFIX}/bin/agentbox --version")
     end

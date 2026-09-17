@@ -104,6 +104,7 @@ function recordingEngine(dir, exitCode = 0) {
     path,
     `#!/bin/sh
 if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
+if [ "$1" = version ]; then exit 0; fi
 printf '%s\\0' "$@" > '${argv}'
 env > '${environment}'
 exit ${exitCode}
@@ -222,6 +223,23 @@ test("launch matrix constructs exact protocol and preserves argv", async (t) => 
       assert.ok(argv.includes("--mode"));
       assert.ok(argv.includes(entry.mode));
       assert.ok(argv.includes("--release"));
+      const imageIndex = argv.findIndex((arg) =>
+        /^ghcr\.io\/zurfyx\/agentbox-runtime@sha256:[0-9a-f]{64}$/.test(arg),
+      );
+      assert.notEqual(imageIndex, -1);
+      const release = argv[argv.indexOf("--release") + 1];
+      assert.deepEqual(argv.slice(imageIndex), [
+        argv[imageIndex],
+        "run",
+        "--protocol",
+        "1",
+        "--mode",
+        entry.mode,
+        "--release",
+        release,
+        "--",
+        ...entry.forwarded,
+      ]);
       assert.ok(argv.some((arg) => arg.endsWith("dst=/home/node/runtime,readonly")));
       assert.ok(argv.some((arg) => arg.endsWith(`dst=${prepared.home}/runtime,readonly`)));
       assert.ok(argv.some((arg) => arg.includes("dst=/opt/agentbox/vendor,readonly")));
@@ -237,6 +255,176 @@ test("launch matrix constructs exact protocol and preserves argv", async (t) => 
       assert.equal(engineEnvironment.includes("AGENTBOX_TEST_"), false);
     });
   }
+});
+
+test("first launch prepares only its vendor and later launch immutably enriches it", (t) => {
+  const dir = tempDir(t);
+  const home = resolve(dir, "personal");
+  const runtimeRoot = resolve(home, "runtime");
+  mkdirSync(resolve(home, ".claude"), { recursive: true });
+  const userState = resolve(home, ".claude", "settings.json");
+  writeFileSync(userState, '{"owned":"user"}\n');
+  const artifacts = createVendorDownloads(dir);
+  const value = bindManagedFiles(bindArtifacts(manifest(), artifacts));
+  const manifestPath = resolve(dir, "manifest.json");
+  writeManifest(manifestPath, value);
+  const log = resolve(dir, "engine.log");
+  const engine = resolve(dir, "engine");
+  writeProtocolEngine(engine, { logPath: log, runExit: 42 });
+  const launch = (args) => run(CLI, args, {
+    env: {
+      AGENTBOX_TEST_MODE: "1",
+      AGENTBOX_TEST_MANIFEST: manifestPath,
+      AGENTBOX_TEST_ENGINE: engine,
+      AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads,
+      AGENTBOX_HOME: home,
+      GH_TOKEN: "test",
+    },
+  });
+
+  const codexArchive = readFileSync(resolve(artifacts.downloads, "codex.tar.gz"));
+  rmSync(resolve(artifacts.downloads, "codex.tar.gz"));
+  expectExit(launch(["clauded", "first"]), 42, "cold Claude launch");
+  const first = JSON.parse(readFileSync(resolve(runtimeRoot, "activation.json"), "utf8"));
+  assert.ok(existsSync(resolve(first.current.release_path, "vendor/claude/claude")));
+  assert.equal(existsSync(resolve(first.current.release_path, "vendor/codex")), false);
+  assert.match(readFileSync(log, "utf8"), / prepare --protocol 1 .*--agent claude /);
+  const inspect = (args) => run("python3", ["-I", STATE, "--expected-version", VERSION, "inspect", ...args]);
+  const claudeInspect = inspect([
+    "--agent", "claude", "--root", runtimeRoot, "--manifest", manifestPath,
+  ]);
+  expectExit(claudeInspect, 0, "Claude-scoped inspect");
+  assert.equal(JSON.parse(claudeInspect.stdout).state, "ready");
+  assert.equal(
+    JSON.parse(inspect(["--root", runtimeRoot, "--manifest", manifestPath]).stdout).state,
+    "partial",
+  );
+  const doctor = launch(["doctor", "--json"]);
+  expectExit(doctor, 0, "doctor after selective first launch");
+  assert.deepEqual(JSON.parse(doctor.stdout), {
+    agentbox_version: VERSION,
+    engine: "ok",
+    image: "ok",
+    ready_agents: ["claude"],
+    state: "partial",
+  });
+  const noUpdate = launch(["--no-update", "codex", "missing"]);
+  assert.notEqual(noUpdate.status, 0);
+  assert.match(noUpdate.stderr, /existing valid active release/);
+
+  const firstBytes = readFileSync(resolve(first.current.release_path, "vendor/claude/claude"));
+  writeFileSync(resolve(artifacts.downloads, "codex.tar.gz"), codexArchive);
+  rmSync(resolve(artifacts.downloads, "claude"));
+  expectExit(launch(["codex", "second"]), 42, "Codex enrichment launch");
+  const enriched = JSON.parse(readFileSync(resolve(runtimeRoot, "activation.json"), "utf8"));
+  assert.notEqual(enriched.current.release_id, first.current.release_id);
+  assert.equal(enriched.previous, null);
+  assert.deepEqual(
+    readFileSync(resolve(enriched.current.release_path, "vendor/claude/claude")),
+    firstBytes,
+  );
+  assert.ok(existsSync(resolve(enriched.current.release_path, "vendor/codex/bin/codex")));
+  assert.equal(existsSync(resolve(first.current.release_path, "vendor/codex")), false);
+  assert.equal(readFileSync(userState, "utf8"), '{"owned":"user"}\n');
+  assert.match(readFileSync(log, "utf8"), / prepare --protocol 1 .*--agent all .*--reuse /);
+});
+
+test("cold Codex launch does not require Claude bytes", (t) => {
+  const dir = tempDir(t);
+  const home = resolve(dir, "personal");
+  const artifacts = createVendorDownloads(dir);
+  const value = bindManagedFiles(bindArtifacts(manifest(), artifacts));
+  const manifestPath = resolve(dir, "manifest.json");
+  writeManifest(manifestPath, value);
+  rmSync(resolve(artifacts.downloads, "claude"));
+  const engine = resolve(dir, "engine");
+  writeProtocolEngine(engine, { runExit: 42 });
+  const result = run(CLI, ["codex", "first"], {
+    env: {
+      AGENTBOX_TEST_MODE: "1",
+      AGENTBOX_TEST_MANIFEST: manifestPath,
+      AGENTBOX_TEST_ENGINE: engine,
+      AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads,
+      AGENTBOX_HOME: home,
+      GH_TOKEN: "test",
+    },
+  });
+  expectExit(result, 42, "cold Codex launch");
+  const activation = JSON.parse(readFileSync(resolve(home, "runtime/activation.json"), "utf8"));
+  assert.ok(existsSync(resolve(activation.current.release_path, "vendor/codex/bin/codex")));
+  assert.equal(existsSync(resolve(activation.current.release_path, "vendor/claude")), false);
+});
+
+test("manual rollback hold blocks missing-agent reconciliation with reset guidance", (t) => {
+  const dir = tempDir(t);
+  const home = resolve(dir, "personal");
+  const root = resolve(home, "runtime");
+  const artifacts = createVendorDownloads(dir);
+  const bind = (value) => bindManagedFiles(bindArtifacts(value, artifacts));
+  const firstPath = resolve(dir, "first.json");
+  writeManifest(firstPath, bind(manifest()));
+  const secondValue = bind(manifest());
+  secondValue.runtime.image = `ghcr.io/zurfyx/agentbox-runtime@sha256:${"b".repeat(64)}`;
+  const secondPath = resolve(dir, "second.json");
+  writeManifest(secondPath, secondValue);
+  const engine = resolve(dir, "engine");
+  const engineLog = resolve(dir, "engine.log");
+  writeProtocolEngine(engine, { logPath: engineLog });
+  const stateOptions = {
+    env: { AGENTBOX_TEST_MODE: "1", AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads },
+  };
+  const prepare = (agent, path) => run("python3", [
+    "-I", STATE, "--expected-version", VERSION, "prepare", "--agent", agent,
+    "--root", root, "--manifest", path, "--engine", engine,
+  ], stateOptions);
+  expectExit(prepare("claude", firstPath), 0, "partial rollback target");
+  expectExit(prepare("all", secondPath), 0, "full successor");
+  expectExit(run("python3", [
+    "-I", STATE, "--expected-version", VERSION, "rollback", "--root", root,
+    "--accept-vendor-state-risk",
+  ]), 0, "select partial rollback target");
+  const held = readFileSync(resolve(root, "activation.json"), "utf8");
+  const logBefore = readFileSync(engineLog, "utf8");
+  const common = {
+    AGENTBOX_TEST_MODE: "1",
+    AGENTBOX_TEST_MANIFEST: secondPath,
+    AGENTBOX_TEST_ENGINE: engine,
+    AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads,
+    AGENTBOX_HOME: home,
+    GH_TOKEN: "test",
+  };
+
+  for (const args of [["codex", "held"], ["--no-update", "codex", "held"], ["setup"]]) {
+    const result = run(CLI, args, { env: common });
+    assert.notEqual(result.status, 0, args.join(" "));
+    assert.match(result.stderr, /manual rollback hold|reset-selector/i);
+    assert.doesNotMatch(result.stderr, /is prepared/);
+    assert.equal(readFileSync(engineLog, "utf8"), logBefore);
+    assert.equal(readFileSync(resolve(root, "activation.json"), "utf8"), held);
+  }
+});
+
+test("--no-update distinguishes unavailable Docker from a missing image", (t) => {
+  const prepared = fixture(t);
+  const unavailable = resolve(prepared.dir, "unavailable-engine");
+  writeExecutable(unavailable, "#!/bin/sh\nexit 44\n");
+  const stopped = cli(["--no-update", "claude", "hello"], prepared, unavailable);
+  expectExit(stopped, 69, "stopped Docker");
+  assert.match(stopped.stderr, /start Docker Desktop/i);
+  assert.match(stopped.stderr, /retry the same command/i);
+  assert.doesNotMatch(stopped.stderr, /image is missing|agentbox setup/i);
+
+  const missing = resolve(prepared.dir, "missing-image-engine");
+  writeExecutable(missing, `#!/bin/sh
+if [ "$1" = version ]; then exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then exit 1; fi
+exit 99
+`);
+  const absentImage = cli(["--no-update", "claude", "hello"], prepared, missing);
+  expectExit(absentImage, 69, "missing image");
+  assert.match(absentImage.stderr, /image is missing/i);
+  assert.match(absentImage.stderr, /without `--no-update`/);
+  assert.doesNotMatch(absentImage.stderr, /start Docker Desktop/i);
 });
 
 test("TTY detection maps to Docker stdin and terminal flags", (t) => {
@@ -278,6 +466,7 @@ test("non-TTY launches keep piped stdin attached", (t) => {
     engine.path,
     `#!/bin/sh
 if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
+if [ "$1" = version ]; then exit 0; fi
 printf '%s\\0' "$@" > '${engine.argv}'
 env > '${engine.environment}'
 cat > '${stdinRecord}'

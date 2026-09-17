@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -212,6 +213,128 @@ test("managed root rejects symlink ancestry and unsafe ownership modes", (t) => 
   assert.match(unsafe.stderr, /writable by another user/);
 });
 
+test("reuse identity includes shared tool data and only the selected platform artifact", (t) => {
+  const dir = tempDir(t);
+  const root = resolve(dir, "home", "runtime");
+  const artifacts = createVendorDownloads(dir);
+  const bind = (value) => {
+    bindArtifacts(value, artifacts);
+    value.managed_files.runtime_instructions.sha256 = sha256(
+      readFileSync(resolve(ROOT, "runtime/instructions.md")),
+    );
+    value.managed_files.statusline.sha256 = sha256(
+      readFileSync(resolve(ROOT, "runtime/statusline.sh")),
+    );
+    return value;
+  };
+  const engine = resolve(dir, "engine");
+  writeProtocolEngine(engine);
+  const options = {
+    env: {
+      AGENTBOX_TEST_MODE: "1",
+      AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads,
+    },
+  };
+  const firstPath = resolve(dir, "first.json");
+  const firstValue = bind(manifest());
+  writeManifest(firstPath, firstValue);
+  expectExit(state([
+    "prepare", "--agent", "claude", "--root", root, "--manifest", firstPath, "--engine", engine,
+  ], options), 0, "initial selected-platform prepare");
+  const first = JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8"));
+
+  const hostPlatform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
+  const otherPlatform = hostPlatform === "linux/arm64" ? "linux/amd64" : "linux/arm64";
+  const secondValue = structuredClone(firstValue);
+  const other = secondValue.tools.claude.platforms.find((item) => item.platform === otherPlatform);
+  other.sha256 = "c".repeat(64);
+  other.size += 1;
+  const secondPath = resolve(dir, "second.json");
+  writeManifest(secondPath, secondValue);
+  unlinkSync(resolve(artifacts.downloads, "claude"));
+  expectExit(state([
+    "prepare", "--agent", "claude", "--root", root, "--manifest", secondPath, "--engine", engine,
+  ], options), 0, "reuse across non-host platform metadata change");
+  const second = JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8"));
+  assert.notEqual(second.current.manifest_sha256, first.current.manifest_sha256);
+  assert.deepEqual(second.previous, first.current);
+
+  const thirdValue = structuredClone(secondValue);
+  const selected = thirdValue.tools.claude.platforms.find((item) => item.platform === hostPlatform);
+  selected.sha256 = "d".repeat(64);
+  selected.size += 1;
+  const thirdPath = resolve(dir, "third.json");
+  writeManifest(thirdPath, thirdValue);
+  const changedSelected = state([
+    "prepare", "--agent", "claude", "--root", root, "--manifest", thirdPath, "--engine", engine,
+  ], options);
+  expectExit(changedSelected, 65, "changed selected platform is not reused");
+  assert.match(changedSelected.stderr, /test download fixture is missing: claude/);
+  assert.deepEqual(JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8")), second);
+});
+
+test("manual rollback hold stays visible when the requested agent is absent", (t) => {
+  const dir = tempDir(t);
+  const root = resolve(dir, "home", "runtime");
+  const artifacts = createVendorDownloads(dir);
+  const bind = (value) => {
+    bindArtifacts(value, artifacts);
+    value.managed_files.runtime_instructions.sha256 = sha256(
+      readFileSync(resolve(ROOT, "runtime/instructions.md")),
+    );
+    value.managed_files.statusline.sha256 = sha256(
+      readFileSync(resolve(ROOT, "runtime/statusline.sh")),
+    );
+    return value;
+  };
+  const options = { env: { AGENTBOX_TEST_MODE: "1", AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads } };
+  const engine = resolve(dir, "engine");
+  const engineLog = resolve(dir, "engine.log");
+  writeProtocolEngine(engine, { logPath: engineLog });
+  const firstPath = resolve(dir, "first.json");
+  writeManifest(firstPath, bind(manifest()));
+  expectExit(state([
+    "prepare", "--agent", "claude", "--root", root, "--manifest", firstPath, "--engine", engine,
+  ], options), 0, "partial rollback target");
+  const first = JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8"));
+
+  const secondValue = bind(manifest());
+  secondValue.runtime.image = `ghcr.io/zurfyx/agentbox-runtime@sha256:${"b".repeat(64)}`;
+  const secondPath = resolve(dir, "second.json");
+  writeManifest(secondPath, secondValue);
+  expectExit(state([
+    "prepare", "--agent", "all", "--root", root, "--manifest", secondPath, "--engine", engine,
+  ], options), 0, "full successor");
+  expectExit(state([
+    "rollback", "--root", root, "--accept-vendor-state-risk",
+  ]), 0, "rollback to partial release");
+  const held = JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8"));
+  assert.deepEqual(held.current, first.current);
+  const inspection = JSON.parse(state([
+    "inspect", "--agent", "codex", "--root", root, "--manifest", secondPath,
+  ]).stdout);
+  assert.equal(inspection.state, "manual-rollback-hold");
+  assert.deepEqual(inspection.ready_agents, ["claude"]);
+
+  const logBefore = readFileSync(engineLog, "utf8");
+  const blocked = state([
+    "prepare", "--agent", "codex", "--root", root, "--manifest", secondPath, "--engine", engine,
+  ], options);
+  expectExit(blocked, 65, "held selective prepare");
+  assert.match(blocked.stderr, /manual rollback hold|reset-selector/i);
+  assert.equal(readFileSync(engineLog, "utf8"), logBefore);
+  assert.deepEqual(JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8")), held);
+
+  expectExit(state([
+    "prepare", "--reset-selector", "--agent", "all", "--root", root,
+    "--manifest", secondPath, "--engine", engine,
+  ], options), 0, "explicit selector reset");
+  const reset = JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8"));
+  assert.equal(reset.selection.mode, "normal");
+  assert.equal(reset.previous, null);
+  assert.notEqual(reset.current.release_id, first.current.release_id);
+});
+
 test("activation is coherent, idempotent, and retains last good on failure", async (t) => {
   const dir = tempDir(t);
   const root = resolve(dir, "home", "runtime");
@@ -347,12 +470,18 @@ test("activation is coherent, idempotent, and retains last good on failure", asy
     mode: "manual_rollback_hold",
     reason: "vendor_state_risk_accepted",
   });
-
-  expectExit(
-    state(["prepare", "--root", root, "--manifest", second, "--engine", goodEngine], stateEnv),
-    0,
-    "prepare under rollback hold",
+  const heldForCodex = JSON.parse(
+    state(["inspect", "--agent", "codex", "--root", root, "--manifest", second]).stdout,
   );
+  assert.equal(heldForCodex.state, "manual-rollback-hold");
+  assert.deepEqual(heldForCodex.ready_agents, ["claude", "codex"]);
+
+  const heldPrepare = state(
+    ["prepare", "--root", root, "--manifest", second, "--engine", goodEngine],
+    stateEnv,
+  );
+  expectExit(heldPrepare, 65, "prepare under rollback hold");
+  assert.match(heldPrepare.stderr, /manual rollback hold|reset-selector/i);
   assert.deepEqual(
     JSON.parse(readFileSync(resolve(root, "activation.json"), "utf8")),
     rolledBack,

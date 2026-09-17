@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { ROOT, expectExit, run, tempDir, writeExecutable } from "./helpers.mjs";
 
@@ -28,6 +28,86 @@ test("distribution entry points and hooks are executable", () => {
     assert.ok(existsSync(resolve(ROOT, path)), `${path} is missing`);
     assert.ok(statSync(resolve(ROOT, path)).mode & 0o111, `${path} is not executable`);
   }
+});
+
+test("README presents trusted install and direct first use", () => {
+  const readme = read("README.md");
+  const gettingStarted = readme.slice(
+    readme.indexOf("## Install and run"),
+    readme.indexOf("## Learn more"),
+  );
+  const trust = gettingStarted.indexOf("brew trust zurfyx/tap");
+  const install = gettingStarted.indexOf("brew install zurfyx/tap/agentbox");
+  const claude = gettingStarted.indexOf("agentbox claude", install);
+  const codex = gettingStarted.indexOf("agentbox codex", install);
+
+  assert.ok(trust >= 0, "README must document trusting the tap");
+  assert.ok(install > trust, "tap trust must precede installation");
+  assert.match(
+    gettingStarted,
+    /```sh\nbrew trust zurfyx\/tap\nbrew install zurfyx\/tap\/agentbox\n```[\s\S]*```sh\nagentbox claude\nagentbox codex\n```/,
+    "fresh install must resolve the trusted tap before direct agent launch",
+  );
+  assert.doesNotMatch(gettingStarted, /^brew install agentbox$/m);
+  assert.ok(claude > install, "Claude must be directly launchable after installation");
+  assert.ok(codex > install, "Codex must be directly launchable after installation");
+  assert.doesNotMatch(gettingStarted, /agentbox (?:setup|doctor)/);
+  assert.doesNotMatch(readme, /npm ci|scripts\/dev\.sh|Release rollout and recovery runbook/);
+});
+
+test("local Markdown links resolve and detailed docs are packaged", () => {
+  const markdown = [
+    "README.md",
+    "docs/development.md",
+    "docs/release.md",
+    "docs/security.md",
+    "docs/usage.md",
+  ];
+  for (const path of markdown) {
+    const source = read(path);
+    for (const match of source.matchAll(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g)) {
+      const target = match[1];
+      if (/^(?:[a-z]+:|#)/i.test(target)) continue;
+      const [localPath, fragment] = target.split("#", 2);
+      const resolvedTarget = resolve(dirname(resolve(ROOT, path)), localPath);
+      assert.ok(
+        existsSync(resolvedTarget),
+        `${path} links to missing ${target}`,
+      );
+      if (fragment) {
+        const headings = [...readFileSync(resolvedTarget, "utf8").matchAll(/^#{1,6}\s+(.+)$/gm)].map(
+          ([, heading]) =>
+            heading
+              .toLowerCase()
+              .replace(/[^a-z0-9 _-]/g, "")
+              .trim()
+              .replace(/\s+/g, "-"),
+        );
+        assert.ok(headings.includes(fragment), `${path} links to missing heading ${target}`);
+      }
+    }
+  }
+
+  const formula = read("Formula/agentbox.rb");
+  const release = read("scripts/release.sh");
+  const formulaDocs = formula.slice(
+    formula.indexOf('(pkgshare/"docs").install('),
+    formula.indexOf("\n    )", formula.indexOf('(pkgshare/"docs").install(')) + 6,
+  );
+  assert.deepEqual(
+    [...formulaDocs.matchAll(/"(docs\/[^"]+)"/g)].map((match) => match[1]),
+    markdown.slice(1),
+    "Homebrew must install only the documentation allowlist",
+  );
+  for (const path of markdown.slice(1)) {
+    assert.match(release, new RegExp(path.replace(/[./]/g, "\\$&")));
+  }
+  assert.match(formula, /\(pkgshare\/"docs"\)\.install\(/);
+  assert.doesNotMatch(formula, /pkgshare\.install[^\n]*"docs"/);
+  assert.match(release, /packaged_docs=\([\s\S]*docs\/usage\.md[\s\S]*docs\/release\.md[\s\S]*\)/);
+  assert.match(release, /git -C "\$source_root" ls-files --error-unmatch -- "\$path"/);
+  assert.match(release, /install -m 0444 "\$source_root\/\$path" "\$root\/\$path"/);
+  assert.doesNotMatch(release, /cp -R[^\n]*docs/);
 });
 
 test("launcher resolves the Homebrew bin symlink before locating libexec", (t) => {
@@ -167,7 +247,7 @@ test("host consumes one integrity-checked launch tuple", () => {
   assert.match(host, /pwd\.getpwuid\(os\.getuid\(\)\)\.pw_dir/);
   assert.doesNotMatch(host, /SOURCE_CHECKOUT == 0[\s\S]{0,300}\$HOME\/\.agentbox/);
   const launch = host.slice(host.indexOf("launch_agent()"), host.indexOf("\nmain()"));
-  assert.match(launch, /run_state launch-plan --root "\$root"/);
+  assert.match(launch, /run_state launch-plan --agent "\$requested_agent" --root "\$root"/);
   assert.doesNotMatch(launch, /current-field/);
 
   const state = read("libexec/state.py");
