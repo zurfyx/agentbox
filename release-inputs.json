@@ -25,7 +25,7 @@
     }
   },
   "managed_files": {
-    "runtime_instructions": { "path": "/usr/local/share/agentbox/instructions.md", "sha256": "0ff973bdd17e72a441e5880a112299ec0e566708862a8b5eae6c68d7e53a0478" },
+    "runtime_instructions": { "path": "/usr/local/share/agentbox/instructions.md", "sha256": "2ccf449972183f4b48a3917aa3f2605dbb46d93fea97dc32400c23e88807e2e0" },
     "statusline": { "path": "/usr/local/share/agentbox/statusline.sh", "sha256": "ebcf9964b8f3741d56034ab95afaca4b1eb9abe78fbd2f59e9b1994cf9468501" }
   }
 }

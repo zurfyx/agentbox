@@ -14,15 +14,30 @@ agentbox claude
 agentbox codex
 ```
 
+To reduce a session's host-filesystem reach to the current project, opt in at
+launch time:
+
+```sh
+agentbox --workspace-only claude
+agentbox --workspace-only codex
+```
+
+Workspace-only sessions keep the project and Agentbox vendor home writable and
+keep network access. They omit Agentbox's broad host mounts, optional GitHub
+token, and host bridge. This is defense in depth, not a hostile-code sandbox;
+see [Workspace-only access](docs/security.md#workspace-only-access) for the
+remaining authority and Git metadata exception.
+
 The first launch downloads, verifies, and prepares only the requested agent.
 A later launch of the other agent prepares that agent without discarding the
 first or your persistent agent state.
 
 > [!IMPORTANT]
 > Agentbox provides identity separation and pinned release management, not a
-> sandbox for your files. Normal sessions can read and write broad host mounts.
-> Read the [security model](docs/security.md), especially before using a mode
-> that bypasses permission prompts or exposes host credentials.
+> hostile-code sandbox. Normal sessions can read and write broad host mounts,
+> and workspace-only sessions retain meaningful write, credential, and network
+> authority. Read the [security model](docs/security.md), especially before
+> using a mode that bypasses permission prompts or exposes host credentials.
 
 ## Requirements
 

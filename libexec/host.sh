@@ -161,13 +161,20 @@ runtime_root() {
 
 usage() {
   cat << 'EOF'
-usage: agentbox [--no-update] [claude|clauded|codex] [--] [ARG ...]
+usage: agentbox [--workspace-only] [--no-update] [claude|clauded|codex] [--] [ARG ...]
        agentbox setup [--reset-selector] | update | rollback --accept-vendor-state-risk
        agentbox doctor [--json] | info [--json]
 
 Claude is the default. `clauded` disables Claude permission prompts; Codex
 uses its approvals/sandbox bypass mode. Codex browser login is unsupported;
 use `agentbox codex login --device-auth` or OPENAI_API_KEY.
+
+--workspace-only mounts the canonical Git worktree (plus required linked
+worktree metadata), or the physical current directory outside Git. The
+persistent vendor home remains writable. Network remains enabled; vendor login
+state and a Codex OPENAI_API_KEY remain available. Broad host roots, GH_TOKEN,
+and the onhost bridge are omitted. This limits host-filesystem reach; it is not
+a hostile-code sandbox.
 EOF
 }
 
@@ -338,16 +345,29 @@ rollback_command() {
 }
 
 launch_agent() {
-  local mode="$1" no_update="$2"
-  shift 2
+  local mode="$1" no_update="$2" workspace_only="$3"
+  shift 3
   reject_browser_login "$mode" "$@" || return
   reject_vendor_update "$mode" "$@" || return
-  local manifest="" engine python home root physical_root release image plan plan_fields cwd gh_token="${GH_TOKEN:-}" user_name state gh
+  local manifest="" engine python home root physical_root release image plan plan_fields cwd="" gh_token="" user_name state gh
+  local workspace="" workspace_fields="" workspace_root="" workspace_metadata=""
   local requested_agent="$mode" prior_release="" after_state="" after_release="" prepare_status=0 reconciliation_failed=0
   [[ $requested_agent == clauded ]] && requested_agent=claude
   python="$(resolve_python)" || return
   home="$(account_home)" || return
   root="$(runtime_root "$home")"
+  if [[ $workspace_only == 1 ]]; then
+    cwd="$(pwd -P)" || {
+      printf 'agentbox: cannot resolve the physical working directory\n' >&2
+      return 64
+    }
+    workspace="$(run_state workspace-plan --cwd "$cwd" --agentbox-home "$home")" || return
+    workspace_fields="$("$python" -I -c 'import json,sys;p=json.loads(sys.argv[1]);print(p["cwd"]+"\t"+p["root"]+"\t"+(p["metadata"][0] if p["metadata"] else ""))' "$workspace")"
+    cwd="${workspace_fields%%$'\t'*}"
+    workspace_fields="${workspace_fields#*$'\t'}"
+    workspace_root="${workspace_fields%%$'\t'*}"
+    workspace_metadata="${workspace_fields#*$'\t'}"
+  fi
   if [[ $no_update == 1 ]]; then
     state="$(run_state inspect --agent "$requested_agent" --root "$root" 2> /dev/null || true)"
     if [[ -n $state ]] && "$python" -I -c 'import json,sys;s=json.loads(sys.argv[1]);raise SystemExit(0 if s["state"]=="manual-rollback-hold" and sys.argv[2] not in s.get("ready_agents",[]) else 1)' "$state" "$requested_agent"; then
@@ -417,29 +437,50 @@ launch_agent() {
     image="${plan_fields%%$'\t'*}"
     physical_root="${plan_fields#*$'\t'}"
   fi
-  cwd="$(pwd -P)"
-  user_name="${USER:-$(id -un)}"
-  if [[ -z $gh_token ]]; then
-    for gh in /opt/homebrew/bin/gh /usr/local/bin/gh /usr/bin/gh; do
-      gh="$(trusted_helper_path "$gh" gh 2> /dev/null || true)"
-      if [[ -n $gh ]]; then
-        gh_token="$(env -i PATH=/usr/bin:/bin HOME="$HOME" LC_ALL=C "$gh" auth token --hostname github.com 2> /dev/null || true)"
-        break
+  if [[ $workspace_only == 0 ]]; then
+    cwd="$(pwd -P)"
+    user_name="${USER:-$(id -un)}"
+    gh_token="${GH_TOKEN:-}"
+    if [[ -z $gh_token ]]; then
+      local -a gh_candidates
+      if [[ $TEST_MODE == 1 && -n ${AGENTBOX_TEST_GH_CANDIDATES:-} ]]; then
+        IFS=: read -r -a gh_candidates <<< "$AGENTBOX_TEST_GH_CANDIDATES"
+      else
+        gh_candidates=(/opt/homebrew/bin/gh /usr/local/bin/gh /usr/bin/gh)
       fi
-    done
+      for gh in "${gh_candidates[@]}"; do
+        gh="$(trusted_helper_path "$gh" gh 2> /dev/null || true)"
+        if [[ -n $gh ]]; then
+          gh_token="$(env -i PATH=/usr/bin:/bin HOME="$HOME" LC_ALL=C "$gh" auth token --hostname github.com 2> /dev/null || true)"
+          break
+        fi
+      done
+    fi
+    [[ -n $gh_token ]] || printf 'agentbox: warning: no GitHub token; private GitHub HTTPS access will fail\n' >&2
   fi
-  [[ -n $gh_token ]] || printf 'agentbox: warning: no GitHub token; private GitHub HTTPS access will fail\n' >&2
   local -a docker_args=(run --rm -i)
   [[ -t 1 ]] && docker_args+=(-t)
-  docker_args+=(--mount "type=bind,src=$home,dst=/home/node" --mount "type=bind,src=$physical_root,dst=/home/node/runtime,readonly" --mount "type=bind,src=$physical_root,dst=$physical_root,readonly" --mount "type=bind,src=$release/vendor,dst=/opt/agentbox/vendor,readonly" --mount "type=bind,src=$release/manifest.json,dst=/opt/agentbox/release/manifest.json,readonly")
-  [[ $root == "$physical_root" ]] || docker_args+=(--mount "type=bind,src=$physical_root,dst=$root,readonly")
-  local mount
-  for mount in /Users /Volumes /tmp /private/tmp; do [[ -d $mount ]] && docker_args+=(--mount "type=bind,src=$mount,dst=$mount"); done
-  docker_args+=(-w "$cwd" -e GH_TOKEN -e "AGENTBOX_HOST=${AGENTBOX_HOST:-host.docker.internal}" -e "AGENTBOX_HOST_USER=${AGENTBOX_HOST_USER:-$user_name}")
+  if [[ $workspace_only == 1 ]]; then
+    docker_args+=(--mount "type=bind,src=$home,dst=/home/node" --mount "type=bind,src=$workspace_root,dst=$workspace_root")
+    [[ -z $workspace_metadata ]] || docker_args+=(--mount "type=bind,src=$workspace_metadata,dst=$workspace_metadata")
+    docker_args+=(--mount "type=bind,src=$physical_root,dst=/home/node/runtime,readonly" --mount "type=bind,src=$physical_root,dst=$physical_root,readonly" --mount "type=bind,src=$release/vendor,dst=/opt/agentbox/vendor,readonly" --mount "type=bind,src=$release/manifest.json,dst=/opt/agentbox/release/manifest.json,readonly")
+    [[ $root == "$physical_root" ]] || docker_args+=(--mount "type=bind,src=$physical_root,dst=$root,readonly")
+    docker_args+=(--tmpfs "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777" --tmpfs "/home/node/.ssh:rw,noexec,nosuid,nodev,size=1048576,mode=0700,uid=1000,gid=1000" -w "$cwd")
+  else
+    docker_args+=(--mount "type=bind,src=$home,dst=/home/node" --mount "type=bind,src=$physical_root,dst=/home/node/runtime,readonly" --mount "type=bind,src=$physical_root,dst=$physical_root,readonly" --mount "type=bind,src=$release/vendor,dst=/opt/agentbox/vendor,readonly" --mount "type=bind,src=$release/manifest.json,dst=/opt/agentbox/release/manifest.json,readonly")
+    [[ $root == "$physical_root" ]] || docker_args+=(--mount "type=bind,src=$physical_root,dst=$root,readonly")
+    local mount
+    for mount in /Users /Volumes /tmp /private/tmp; do [[ -d $mount ]] && docker_args+=(--mount "type=bind,src=$mount,dst=$mount"); done
+    docker_args+=(-w "$cwd" -e GH_TOKEN -e "AGENTBOX_HOST=${AGENTBOX_HOST:-host.docker.internal}" -e "AGENTBOX_HOST_USER=${AGENTBOX_HOST_USER:-$user_name}")
+  fi
   [[ $mode == codex && -n ${OPENAI_API_KEY:-} ]] && docker_args+=(-e OPENAI_API_KEY)
   docker_args+=("$image" run --protocol 1 --mode "$mode" --release "$(basename "$release")" -- "$@")
   local -a state_command=(exec-engine -- "$engine" "${docker_args[@]}")
   [[ $mode == codex && (${1:-} == login || ${1:-} == logout) ]] && state_command=(exec-locked --root "$root" -- "$engine" "${docker_args[@]}")
+  if [[ $workspace_only == 1 ]]; then
+    state_command=(exec-engine --without-github -- "$engine" "${docker_args[@]}")
+    [[ $mode == codex && (${1:-} == login || ${1:-} == logout) ]] && state_command=(exec-locked --root "$root" --without-github -- "$engine" "${docker_args[@]}")
+  fi
   if [[ $mode == codex && -n ${OPENAI_API_KEY:-} ]]; then
     if [[ $DEV_MODE == 1 ]]; then
       GH_TOKEN="$gh_token" OPENAI_API_KEY="$OPENAI_API_KEY" "$python" -I "$STATE_HELPER" --development "${state_command[@]}"
@@ -456,10 +497,35 @@ launch_agent() {
 }
 
 main() {
-  local no_update=0 mode=claude
-  if [[ ${1:-} == --no-update ]]; then
-    no_update=1
-    shift
+  local no_update=0 workspace_only=0 mode=claude
+  while :; do
+    case "${1:-}" in
+      --no-update)
+        [[ $no_update == 0 ]] || {
+          printf 'agentbox: --no-update may be specified only once\n' >&2
+          return 64
+        }
+        no_update=1
+        shift
+        ;;
+      --workspace-only)
+        [[ $workspace_only == 0 ]] || {
+          printf 'agentbox: --workspace-only may be specified only once\n' >&2
+          return 64
+        }
+        workspace_only=1
+        shift
+        ;;
+      *) break ;;
+    esac
+  done
+  if [[ $workspace_only == 1 ]]; then
+    case "${1:-}" in
+      setup | update | rollback | doctor | info)
+        printf 'agentbox: --workspace-only applies only to agent launches\n' >&2
+        return 64
+        ;;
+    esac
   fi
   if [[ $no_update == 1 ]]; then
     case "${1:-}" in
@@ -538,6 +604,6 @@ main() {
       ;;
     --) shift ;;
   esac
-  launch_agent "$mode" "$no_update" "$@"
+  launch_agent "$mode" "$no_update" "$workspace_only" "$@"
 }
 main "$@"

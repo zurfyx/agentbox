@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -10,6 +11,14 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {
+  AGENTBOX_VERSION,
+  bindArtifacts,
+  createVendorDownloads,
+  manifest,
+  sha256,
+  writeManifest,
+} from "./fixtures.mjs";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const PYTHON = spawnSync("/bin/sh", ["-c", "command -v python3"], {
@@ -111,4 +120,78 @@ exit 0
 `,
   );
   return { logPath, path };
+}
+
+export function preparedLaunchFixture(t) {
+  const dir = tempDir(t);
+  const home = resolve(dir, "personal");
+  const runtimeRoot = resolve(home, "runtime");
+  const artifacts = createVendorDownloads(dir);
+  const value = bindArtifacts(manifest(), artifacts);
+  value.managed_files.runtime_instructions.sha256 = sha256(
+    readFileSync(resolve(ROOT, "runtime/instructions.md")),
+  );
+  value.managed_files.statusline.sha256 = sha256(
+    readFileSync(resolve(ROOT, "runtime/statusline.sh")),
+  );
+  const manifestPath = resolve(dir, "release-manifest.json");
+  writeManifest(manifestPath, value);
+
+  const setupEngine = resolve(dir, "setup-engine");
+  writeProtocolEngine(setupEngine);
+  const prepared = run(
+    "python3",
+    [
+      "-I",
+      resolve(ROOT, "libexec/state.py"),
+      "--expected-version",
+      AGENTBOX_VERSION,
+      "prepare",
+      "--root",
+      runtimeRoot,
+      "--manifest",
+      manifestPath,
+      "--engine",
+      setupEngine,
+    ],
+    {
+      env: {
+        AGENTBOX_TEST_MODE: "1",
+        AGENTBOX_TEST_DOWNLOAD_DIR: artifacts.downloads,
+      },
+    },
+  );
+  expectExit(prepared, 0, "fixture state preparation");
+  return {
+    dir,
+    downloads: artifacts.downloads,
+    home,
+    manifestPath,
+    runtimeRoot,
+  };
+}
+
+export function recordingEngine(dir, exitCode = 0, name = `engine-${exitCode}`) {
+  const path = resolve(dir, name);
+  const argv = `${path}.argv`;
+  const calls = `${path}.calls`;
+  const environment = `${path}.env`;
+  writeExecutable(
+    path,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> '${calls}'
+if [ "$1" = image ] && [ "$2" = inspect ]; then exit 0; fi
+if [ "$1" = version ]; then exit 0; fi
+printf '%s\\0' "$@" > '${argv}'
+env > '${environment}'
+exit ${exitCode}
+`,
+  );
+  return {
+    argv,
+    calls,
+    environment,
+    path,
+    wasCalled: () => existsSync(calls),
+  };
 }

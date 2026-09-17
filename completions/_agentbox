@@ -4,7 +4,8 @@
 
 _agentbox() {
   local first=${words[2]-}
-  local -a root after_no_update report setup rollback
+  local second=${words[3]-}
+  local -a root after_no_update after_workspace_only after_both report setup rollback
 
   root=(
     'claude:run Claude Code'
@@ -16,7 +17,9 @@ _agentbox() {
     'doctor:check installation and managed-state integrity'
     'info:show installed and active release information'
     'help:show Agentbox help'
+    '-h:show Agentbox help'
     '--no-update:skip lazy installed-release reconciliation'
+    '--workspace-only:limit host filesystem access to the current workspace'
     '--help:show Agentbox help'
     '--version:show the Agentbox version'
   )
@@ -24,7 +27,33 @@ _agentbox() {
     'claude:run Claude Code'
     'clauded:run Claude Code without permission prompts'
     'codex:run Codex without approval prompts or its sandbox'
+    '--workspace-only:limit host filesystem access to the current workspace'
     '--:pass all following arguments to Claude'
+    'help:show Agentbox help'
+    '-h:show Agentbox help'
+    '--help:show Agentbox help'
+    '--version:show the Agentbox version'
+  )
+  after_workspace_only=(
+    'claude:run Claude Code'
+    'clauded:run Claude Code without permission prompts'
+    'codex:run Codex without approval prompts or its sandbox'
+    '--no-update:skip lazy installed-release reconciliation'
+    '--:pass all following arguments to Claude'
+    'help:show Agentbox help'
+    '-h:show Agentbox help'
+    '--help:show Agentbox help'
+    '--version:show the Agentbox version'
+  )
+  after_both=(
+    'claude:run Claude Code'
+    'clauded:run Claude Code without permission prompts'
+    'codex:run Codex without approval prompts or its sandbox'
+    '--:pass all following arguments to Claude'
+    'help:show Agentbox help'
+    '-h:show Agentbox help'
+    '--help:show Agentbox help'
+    '--version:show the Agentbox version'
   )
   report=(
     '--json:emit stable JSON'
@@ -37,12 +66,27 @@ _agentbox() {
     return
   fi
 
-  if [[ $first == --no-update ]]; then
+  if [[ $first == --no-update || $first == --workspace-only ]]; then
     if ((CURRENT == 3)); then
-      _describe -t agentbox-mode 'Agentbox mode' after_no_update
+      if [[ $first == --no-update ]]; then
+        _describe -t agentbox-mode 'Agentbox mode' after_no_update
+      else
+        _describe -t agentbox-mode 'Agentbox mode' after_workspace_only
+      fi
       return
     fi
-    first=${words[3]-}
+    if [[ $second == --no-update || $second == --workspace-only ]]; then
+      if [[ $second == $first ]]; then
+        return
+      fi
+      if ((CURRENT == 4)); then
+        _describe -t agentbox-mode 'Agentbox mode' after_both
+        return
+      fi
+      first=${words[4]-}
+    else
+      first=$second
+    fi
     case "$first" in
       claude | clauded | codex | --) _files ;;
       setup | update | rollback | doctor | info | help | -h | --help | --version) ;;

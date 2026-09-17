@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -53,6 +54,97 @@ test("README presents trusted install and direct first use", () => {
   assert.ok(codex > install, "Codex must be directly launchable after installation");
   assert.doesNotMatch(gettingStarted, /agentbox (?:setup|doctor)/);
   assert.doesNotMatch(readme, /npm ci|scripts\/dev\.sh|Release rollout and recovery runbook/);
+});
+
+test("workspace-only documentation states the exact grammar and remaining authority", () => {
+  const readme = read("README.md");
+  const usage = read("docs/usage.md");
+  const security = read("docs/security.md");
+  const instructions = read("runtime/instructions.md");
+  const publicDocs = `${readme}\n${usage}\n${security}`;
+
+  assert.match(
+    usage,
+    /agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\] \[--\] \[ARG \.\.\.\]/,
+  );
+  assert.match(usage, /Each may appear at most once, and they may appear in either order/);
+  assert.match(usage, /selector, `--`, or the first unknown[\s\S]*forwarded unchanged/);
+  assert.match(usage, /agentbox codex --workspace-only` passes the flag to\s+Codex/);
+  assert.match(usage, /Global Agentbox flags do not apply\s+to lifecycle commands/);
+  assert.match(usage, /`help`, `-h`, `--help`, and `--version` are\s+early-exit exceptions/);
+  assert.match(usage, /accepted after either or both global options/);
+
+  for (const expected of [
+    "agentbox --workspace-only claude",
+    "agentbox --workspace-only codex",
+    "canonical Git worktree",
+    "physical current directory",
+    "standard linked worktree",
+    "common Git directory",
+    "external object alternates",
+    "submodule selected as the workspace root",
+    "persistent vendor home",
+    "OPENAI_API_KEY",
+    "network access",
+    "hostile-code sandbox",
+  ]) {
+    assert.match(publicDocs, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  assert.match(security, /objects, refs, hooks, configuration, and sibling-worktree metadata/);
+  assert.match(security, /not[\s\S]{0,40}broadly mounted/);
+  assert.match(security, /neither obtain nor receive this token/);
+  assert.match(security, /Launches without the\s+flag retain the normal behavior/);
+  assert.match(instructions, /Workspace-only sessions omit the broad host mounts/);
+  assert.match(instructions, /still have network access/);
+  assert.match(instructions, /persistent vendor home/);
+  assert.match(instructions, /`OPENAI_API_KEY`[\s\S]*including in workspace-only mode/);
+  assert.match(instructions, /unavailable in[\s\S]*workspace-only mode/);
+
+  const host = read("libexec/host.sh");
+  assert.match(
+    host,
+    /usage: agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\] \[--\] \[ARG \.\.\.\]/,
+  );
+
+  const help = run(resolve(ROOT, "bin/agentbox"), ["--help"]);
+  expectExit(help, 0, "workspace-only help");
+  for (const concept of [
+    /--workspace-only/,
+    /canonical Git worktree/,
+    /physical current directory outside Git/,
+    /persistent vendor home remains writable/,
+    /Network remains enabled/,
+    /Codex OPENAI_API_KEY remain available/,
+    /Broad host roots, GH_TOKEN,[\s\S]*onhost bridge are omitted/,
+    /not\s+a hostile-code sandbox/,
+  ]) {
+    assert.match(help.stdout, concept);
+  }
+
+  for (const args of [
+    ["--workspace-only", "help"],
+    ["--no-update", "-h"],
+    ["--workspace-only", "--no-update", "--help"],
+    ["--no-update", "--workspace-only", "--help"],
+  ]) {
+    const result = run(resolve(ROOT, "bin/agentbox"), args);
+    expectExit(result, 0, `global early-exit help ${args.join(" ")}`);
+    assert.equal(result.stdout, help.stdout);
+  }
+  const version = run(resolve(ROOT, "bin/agentbox"), ["--workspace-only", "--version"]);
+  expectExit(version, 0, "global early-exit version");
+  assert.equal(version.stdout, `agentbox ${VERSION}\n`);
+});
+
+test("reviewed runtime instruction hashes match every build input", () => {
+  const digest = createHash("sha256").update(read("runtime/instructions.md")).digest("hex");
+  const releaseInputs = JSON.parse(read("release-inputs.json"));
+  const dockerfile = read("Dockerfile");
+  const dockerDigest = dockerfile.match(/^ARG INSTRUCTIONS_SHA256=([0-9a-f]{64})$/m)?.[1];
+
+  assert.equal(releaseInputs.managed_files.runtime_instructions.sha256, digest);
+  assert.equal(dockerDigest, digest);
 });
 
 test("local Markdown links resolve and detailed docs are packaged", () => {
@@ -300,15 +392,162 @@ test("the public image is payload-free and non-root", () => {
   assert.match(dockerfile, /runtime/);
 });
 
-test("completions are static data, never launcher execution", () => {
-  for (const path of [
+test("completions are static data and preserve the global-prefix boundary", (t) => {
+  const paths = [
     "completions/agentbox.bash",
     "completions/_agentbox",
     "completions/agentbox.fish",
-  ]) {
+  ];
+  for (const path of paths) {
     if (!existsSync(resolve(ROOT, path))) continue;
     const source = read(path);
     assert.doesNotMatch(source, /\$\([^)]*agentbox|`[^`]*agentbox/);
+    assert.match(source, /--no-update/);
+    assert.match(source, /--workspace-only/);
+  }
+  const fishSource = read("completions/agentbox.fish");
+  assert.doesNotMatch(fishSource, /__fish_seen_subcommand_from/);
+  assert.match(fishSource, /function __agentbox_is_lifecycle/);
+  assert.match(fishSource, /test "\$words\[1\]" = "\$expected"/);
+  assert.match(fishSource, /function __agentbox_in_closed_command/);
+  assert.match(fishSource, /complete -c agentbox -f -n '__agentbox_in_closed_command'/);
+  assert.match(fishSource, /__agentbox_is_lifecycle setup/);
+  assert.match(fishSource, /__agentbox_is_lifecycle rollback/);
+  assert.match(fishSource, /__agentbox_is_report_lifecycle/);
+
+  expectExit(run("bash", ["-n", "completions/agentbox.bash"]), 0, "Bash completion parse");
+  expectExit(run("zsh", ["-n", "completions/_agentbox"]), 0, "zsh completion parse");
+
+  const complete = (...words) => {
+    const script = [
+      'source "$1"',
+      "shift",
+      'COMP_WORDS=(agentbox "$@")',
+      "COMP_CWORD=$((${#COMP_WORDS[@]} - 1))",
+      "_agentbox_complete",
+      '((${#COMPREPLY[@]} == 0)) || printf \'%s\\n\' "${COMPREPLY[@]}"',
+    ].join("\n");
+    const result = run("bash", [
+      "-c",
+      script,
+      "agentbox-completion-test",
+      resolve(ROOT, "completions/agentbox.bash"),
+      ...words,
+    ]);
+    expectExit(result, 0, `Bash completion for ${JSON.stringify(words)}`);
+    return result.stdout.trim().split("\n").filter(Boolean);
+  };
+
+  const root = complete("");
+  assert.ok(root.includes("--workspace-only"));
+  assert.ok(root.includes("--no-update"));
+  assert.ok(root.includes("setup"));
+
+  for (const [first, second] of [
+    ["--workspace-only", "--no-update"],
+    ["--no-update", "--workspace-only"],
+  ]) {
+    const afterFirst = complete(first, "");
+    assert.ok(afterFirst.includes(second));
+    assert.ok(afterFirst.includes("claude"));
+    assert.ok(afterFirst.includes("codex"));
+    assert.ok(afterFirst.includes("--"));
+    assert.ok(afterFirst.includes("help"));
+    assert.ok(afterFirst.includes("-h"));
+    assert.ok(afterFirst.includes("--help"));
+    assert.ok(afterFirst.includes("--version"));
+    assert.ok(!afterFirst.includes(first));
+    assert.ok(!afterFirst.includes("setup"));
+
+    const afterBoth = complete(first, second, "");
+    assert.deepEqual(afterBoth, [
+      "claude",
+      "clauded",
+      "codex",
+      "--",
+      "help",
+      "-h",
+      "--help",
+      "--version",
+    ]);
+  }
+
+  assert.deepEqual(complete("claude", "--w"), []);
+  assert.deepEqual(complete("codex", "--workspace-only", ""), []);
+  assert.deepEqual(complete("--", "--w"), []);
+  assert.deepEqual(complete("--resume", "--w"), []);
+
+  const zshComplete = (...words) => {
+    const script = [
+      "completion=$1",
+      "shift",
+      'words=(agentbox "$@")',
+      "CURRENT=${#words[@]}",
+      'function _describe { local name=${argv[-1]}; print -l -- "${(@P)name}"; }',
+      'function _files { print "FILES"; }',
+      'source "$completion"',
+    ].join("\n");
+    const result = run("zsh", [
+      "-c",
+      script,
+      "agentbox-completion-test",
+      resolve(ROOT, "completions/_agentbox"),
+      ...words,
+    ]);
+    expectExit(result, 0, `zsh completion for ${JSON.stringify(words)}`);
+    return result.stdout.trim().split("\n").filter(Boolean);
+  };
+  const zshAfterGlobal = zshComplete("--workspace-only", "");
+  for (const expected of ["--no-update", "help", "-h", "--help", "--version"]) {
+    assert.ok(zshAfterGlobal.some((entry) => entry.startsWith(`${expected}:`)), expected);
+  }
+  assert.deepEqual(zshComplete("claude", "setup", ""), ["FILES"]);
+  assert.deepEqual(zshComplete("--", "doctor", ""), ["FILES"]);
+  assert.deepEqual(zshComplete("--resume", "rollback", ""), ["FILES"]);
+
+  const fishLookup = run("/bin/sh", ["-c", "command -v fish"]);
+  if (fishLookup.status === 0) {
+    const fish = fishLookup.stdout.trim();
+    const cwd = tempDir(t);
+    writeFileSync(resolve(cwd, "forwarded-file"), "fixture\n");
+    const fishComplete = (line) => {
+      const result = run(
+        fish,
+        [
+          "-c",
+          "source $argv[1]; cd $argv[2]; complete -C $argv[3]",
+          resolve(ROOT, "completions/agentbox.fish"),
+          cwd,
+          line,
+        ],
+      );
+      expectExit(result, 0, `Fish completion for ${JSON.stringify(line)}`);
+      return result.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((entry) => entry.split("\t", 1)[0]);
+    };
+
+    const afterGlobal = fishComplete("agentbox --workspace-only ");
+    for (const expected of ["--no-update", "claude", "codex", "help", "-h", "--help", "--version"]) {
+      assert.ok(afterGlobal.includes(expected), expected);
+    }
+    assert.ok(fishComplete("agentbox setup --").includes("--reset-selector"));
+    assert.ok(fishComplete("agentbox doctor --").includes("--json"));
+
+    for (const line of [
+      "agentbox claude setup f",
+      "agentbox codex doctor f",
+      "agentbox -- setup f",
+      "agentbox --resume rollback f",
+    ]) {
+      const result = fishComplete(line);
+      assert.ok(result.includes("forwarded-file"), line);
+      assert.ok(!result.includes("--reset-selector"), line);
+      assert.ok(!result.includes("--accept-vendor-state-risk"), line);
+      assert.ok(!result.includes("--json"), line);
+    }
   }
 });
 
