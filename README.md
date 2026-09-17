@@ -22,22 +22,15 @@ agentbox --workspace-only claude
 agentbox --workspace-only codex
 ```
 
-Workspace-only sessions keep the project and Agentbox vendor home writable and
-keep network access. They omit Agentbox's broad host mounts, optional GitHub
-token, and host bridge. This is defense in depth, not a hostile-code sandbox;
-see [Workspace-only access](docs/security.md#workspace-only-access) for the
-remaining authority and Git metadata exception.
+By default, Agentbox can access broad host paths. Workspace-only reduces
+accidental access to unrelated files, but the project, persistent vendor state,
+and network access remain available. See
+[Workspace-only access](docs/security.md#workspace-only-access) for the exact
+boundary and Git metadata exception.
 
 The first launch downloads, verifies, and prepares only the requested agent.
 A later launch of the other agent prepares that agent without discarding the
 first or your persistent agent state.
-
-> [!IMPORTANT]
-> Agentbox provides identity separation and pinned release management, not a
-> hostile-code sandbox. Normal sessions can read and write broad host mounts,
-> and workspace-only sessions retain meaningful write, credential, and network
-> authority. Read the [security model](docs/security.md), especially before
-> using a mode that bypasses permission prompts or exposes host credentials.
 
 ## Requirements
 
