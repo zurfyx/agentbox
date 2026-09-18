@@ -394,6 +394,8 @@ test("the public image is payload-free and non-root", () => {
   assert.match(dockerfile, /\bnodejs\b/);
   assert.match(smoke, /--entrypoint \/usr\/bin\/node/);
   assert.match(smoke, /node:crypto/);
+  assert.match(smoke, /\.tools\.codex\.allowed_members\[\]/);
+  assert.match(smoke, /while IFS= read -r member/);
 });
 
 test("completions are static data and preserve the global-prefix boundary", async (t) => {
