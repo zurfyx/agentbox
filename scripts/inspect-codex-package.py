@@ -17,6 +17,20 @@ MAX_MEMBER_SIZE = 512 * 1024 * 1024
 MAX_EXPANDED_SIZE = 1024 * 1024 * 1024
 MAX_METADATA_SIZE = 64 * 1024
 MAX_MEMBERS = 128
+REQUIRED_MEMBERS = {
+    "bin/",
+    "bin/codex",
+    "bin/codex-code-mode-host",
+    "codex-package.json",
+    "codex-path/",
+    "codex-path/rg",
+    "codex-resources/",
+    "codex-resources/bwrap",
+    "codex-resources/zsh/",
+    "codex-resources/zsh/bin/",
+    "codex-resources/zsh/bin/zsh",
+}
+ALLOWED_ROOTS = {"bin", "codex-path", "codex-resources"}
 METADATA_KEYS = {
     "entrypoint",
     "layoutVersion",
@@ -67,6 +81,21 @@ def load_expected(path: Path) -> set[str]:
     return set(values)
 
 
+def validate_members(values: set[str]) -> list[str]:
+    if not REQUIRED_MEMBERS <= values:
+        fail(f"archive is missing required members: {sorted(REQUIRED_MEMBERS - values)!r}")
+    aliases: set[str] = set()
+    for value in values:
+        clean = value.removesuffix("/")
+        if clean != "codex-package.json" and PurePosixPath(clean).parts[0] not in ALLOWED_ROOTS:
+            fail(f"archive member is outside approved roots: {value!r}")
+        alias = clean.casefold()
+        if alias in aliases:
+            fail(f"archive contains case-fold-colliding member {value!r}")
+        aliases.add(alias)
+    return sorted(values, key=lambda item: item.encode("utf-8"))
+
+
 def inspect(args: argparse.Namespace) -> dict[str, Any]:
     info = args.archive.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -74,7 +103,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     if not 0 < info.st_size <= MAX_ARCHIVE_SIZE:
         fail("archive size is outside the allowed range")
 
-    expected = load_expected(args.members_file)
+    expected = load_expected(args.members_file) if args.members_file is not None else None
     seen: set[str] = set()
     expanded_size = 0
     metadata_bytes: bytes | None = None
@@ -109,7 +138,8 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
 
     if member_count == 0:
         fail("archive is empty")
-    if seen != expected:
+    members = validate_members(seen)
+    if expected is not None and seen != expected:
         missing = sorted(expected - seen)
         extra = sorted(seen - expected)
         fail(f"archive member set changed (missing={missing!r}, extra={extra!r})")
@@ -134,6 +164,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         fail("codex-package.json does not match the requested version and target")
     return {
         "archive_size": info.st_size,
+        "allowed_members": members,
         "expanded_size": expanded_size,
         "members": member_count,
         "target": args.target,
@@ -146,7 +177,7 @@ def main() -> int:
     parser.add_argument("archive", type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--members-file", required=True, type=Path)
+    parser.add_argument("--members-file", type=Path)
     args = parser.parse_args()
     try:
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version):

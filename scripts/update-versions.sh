@@ -207,6 +207,7 @@ codex_amd_sha=${codex_amd_sha#sha256:}
 [[ $codex_amd_sha =~ ^[0-9a-f]{64}$ ]] || die "invalid Codex amd64 digest"
 codex_arm_size=$(head_size "$codex_arm_url")
 codex_amd_size=$(head_size "$codex_amd_url")
+codex_members=$(jq -c '.tools.codex.allowed_members' "$input")
 
 if [[ $verify_downloads == true ]]; then
   verify_artifact "$claude_arm_url" "$claude_arm_size" "$claude_arm_sha" "$tmp_dir/claude-arm64"
@@ -214,13 +215,15 @@ if [[ $verify_downloads == true ]]; then
   verify_artifact "$codex_arm_url" "$codex_arm_size" "$codex_arm_sha" "$tmp_dir/codex-arm64.tar.gz"
   verify_artifact "$codex_amd_url" "$codex_amd_size" "$codex_amd_sha" "$tmp_dir/codex-amd64.tar.gz"
 
-  jq -r '.tools.codex.allowed_members[]' "$input" | LC_ALL=C sort > "$tmp_dir/expected-members"
-  "$CODEX_INSPECTOR" "$tmp_dir/codex-arm64.tar.gz" \
-    --version "$codex_version" --target aarch64-unknown-linux-musl \
-    --members-file "$tmp_dir/expected-members"
-  "$CODEX_INSPECTOR" "$tmp_dir/codex-amd64.tar.gz" \
-    --version "$codex_version" --target x86_64-unknown-linux-musl \
-    --members-file "$tmp_dir/expected-members"
+  codex_arm_inspection=$("$CODEX_INSPECTOR" "$tmp_dir/codex-arm64.tar.gz" \
+    --version "$codex_version" --target aarch64-unknown-linux-musl)
+  codex_amd_inspection=$("$CODEX_INSPECTOR" "$tmp_dir/codex-amd64.tar.gz" \
+    --version "$codex_version" --target x86_64-unknown-linux-musl)
+  codex_arm_members=$(jq -c '.allowed_members' <<< "$codex_arm_inspection")
+  codex_amd_members=$(jq -c '.allowed_members' <<< "$codex_amd_inspection")
+  [[ $codex_arm_members == "$codex_amd_members" ]] ||
+    die "Codex package member sets differ across Linux platforms"
+  codex_members=$codex_arm_members
 fi
 
 old_claude=$(jq -er '.tools.claude.version' "$input")
@@ -233,6 +236,7 @@ jq -S \
   --arg claude_arm_url "$claude_arm_url" --arg claude_arm_sha "$claude_arm_sha" --argjson claude_arm_size "$claude_arm_size" \
   --arg claude_amd_url "$claude_amd_url" --arg claude_amd_sha "$claude_amd_sha" --argjson claude_amd_size "$claude_amd_size" \
   --arg codex_version "$codex_version" \
+  --argjson codex_members "$codex_members" \
   --arg codex_arm_url "$codex_arm_url" --arg codex_arm_sha "$codex_arm_sha" --argjson codex_arm_size "$codex_arm_size" \
   --arg codex_amd_url "$codex_amd_url" --arg codex_amd_sha "$codex_amd_sha" --argjson codex_amd_size "$codex_amd_size" '
     .tools.claude.version = $claude_version |
@@ -241,6 +245,7 @@ jq -S \
     (.tools.claude.platforms[] | select(.platform == "linux/amd64")) |=
       (.url = $claude_amd_url | .sha256 = $claude_amd_sha | .size = $claude_amd_size) |
     .tools.codex.version = $codex_version |
+    .tools.codex.allowed_members = $codex_members |
     (.tools.codex.platforms[] | select(.platform == "linux/arm64")) |=
       (.url = $codex_arm_url | .sha256 = $codex_arm_sha | .size = $codex_arm_size) |
     (.tools.codex.platforms[] | select(.platform == "linux/amd64")) |=
