@@ -198,6 +198,8 @@ test("vendor updater and workflow allowlist only release-inputs.json", () => {
   assert.match(workflow, /"\$\{changed\[0\]\}" != release-inputs\.json/);
   assert.match(workflow, /git add -- release-inputs\.json/);
   assert.match(workflow, /branch=automation\/vendor-update/);
+  assert.equal(workflow.match(/gh pr list --head "\$branch" --state open/g)?.length, 2);
+  assert.doesNotMatch(workflow, /--head "\$GITHUB_REPOSITORY_OWNER:\$branch"/);
   assert.match(workflow, /expected_author="\$APP_SLUG\[bot\]"/);
   assert.match(workflow, /headRefOid/);
   assert.match(workflow, /--force-with-lease="refs\/heads\/\$branch:\$remote_oid"/);
