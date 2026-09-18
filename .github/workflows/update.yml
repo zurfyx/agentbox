@@ -169,12 +169,14 @@ jobs:
           codex_arm_size=$(head_size "$codex_arm_url")
           codex_amd_size=$(head_size "$codex_amd_url")
 
+          codex_members=$(jq -c '.tools.codex.allowed_members' "$payload")
           trusted_payload="$RUNNER_TEMP/trusted-release-inputs.json"
           jq -S \
             --arg claude_version "$claude_version" \
             --arg claude_arm_url "$claude_arm_url" --arg claude_arm_sha "$claude_arm_sha" --argjson claude_arm_size "$claude_arm_size" \
             --arg claude_amd_url "$claude_amd_url" --arg claude_amd_sha "$claude_amd_sha" --argjson claude_amd_size "$claude_amd_size" \
             --arg codex_version "$codex_version" \
+            --argjson codex_members "$codex_members" \
             --arg codex_arm_url "$codex_arm_url" --arg codex_arm_sha "$codex_arm_sha" --argjson codex_arm_size "$codex_arm_size" \
             --arg codex_amd_url "$codex_amd_url" --arg codex_amd_sha "$codex_amd_sha" --argjson codex_amd_size "$codex_amd_size" '
               .tools.claude.version = $claude_version |
@@ -183,6 +185,7 @@ jobs:
               (.tools.claude.platforms[] | select(.platform == "linux/amd64")) |=
                 (.url = $claude_amd_url | .sha256 = $claude_amd_sha | .size = $claude_amd_size) |
               .tools.codex.version = $codex_version |
+              .tools.codex.allowed_members = $codex_members |
               (.tools.codex.platforms[] | select(.platform == "linux/arm64")) |=
                 (.url = $codex_arm_url | .sha256 = $codex_arm_sha | .size = $codex_arm_size) |
               (.tools.codex.platforms[] | select(.platform == "linux/amd64")) |=
@@ -203,6 +206,13 @@ jobs:
           import sys
 
           MAX_SIZE = 512 * 1024 * 1024
+          MAX_CODEX_MEMBERS = 128
+          REQUIRED_CODEX_MEMBERS = {
+              "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
+              "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
+              "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
+          }
+          ALLOWED_CODEX_ROOTS = {"bin", "codex-path", "codex-resources"}
           SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
           SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -226,6 +236,29 @@ jobs:
               if type(value) is not str or not SEMVER.fullmatch(value):
                   raise ValueError(f"invalid {label} version")
               return tuple(int(part) for part in value.split("."))
+
+          def validate_codex_members(value):
+              if type(value) is not list or not 0 < len(value) <= MAX_CODEX_MEMBERS:
+                  raise ValueError("unexpected Codex member count")
+              if any(type(item) is not str for item in value) or len(value) != len(set(value)):
+                  raise ValueError("Codex members must be unique strings")
+              if value != sorted(value, key=lambda item: item.encode("utf-8")):
+                  raise ValueError("Codex members are not bytewise sorted")
+              aliases = set()
+              for item in value:
+                  clean = item.removesuffix("/")
+                  parts = clean.split("/")
+                  if (not clean or len(item.encode("utf-8")) > 256 or "\\" in item or
+                          item.startswith("/") or any(part in {"", ".", ".."} for part in parts)):
+                      raise ValueError("unsafe Codex member path")
+                  if clean != "codex-package.json" and parts[0] not in ALLOWED_CODEX_ROOTS:
+                      raise ValueError("Codex member is outside approved roots")
+                  alias = clean.casefold()
+                  if alias in aliases:
+                      raise ValueError("Codex members case-fold collide")
+                  aliases.add(alias)
+              if not REQUIRED_CODEX_MEMBERS <= set(value):
+                  raise ValueError("Codex package is missing required members")
 
           def validate_platform(record, vendor, version):
               common = {"platform", "url", "sha256", "size"}
@@ -277,13 +310,7 @@ jobs:
                   raise ValueError("unexpected Claude kind")
               if codex["kind"] != "tar.gz-package" or codex["layout_version"] != 1 or codex["entrypoint"] != "bin/codex":
                   raise ValueError("unexpected Codex layout")
-              expected_members = [
-                  "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
-                  "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
-                  "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
-              ]
-              if codex["allowed_members"] != expected_members:
-                  raise ValueError("unexpected Codex member allowlist")
+              validate_codex_members(codex["allowed_members"])
               for vendor, record in (("claude", claude), ("codex", codex)):
                   stable_version(record["version"], vendor)
                   if type(record["platforms"]) is not list or len(record["platforms"]) != 2:
@@ -300,6 +327,7 @@ jobs:
                   for platform in result["tools"][vendor]["platforms"]:
                       for field in ("url", "sha256", "size"):
                           del platform[field]
+              del result["tools"]["codex"]["allowed_members"]
               return result
 
           base = load(sys.argv[1])

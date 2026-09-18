@@ -290,7 +290,7 @@ def extract_codex(archive: Path, destination: Path, allowed: list[str]) -> None:
             if source is None:
                 fail(f"cannot read Codex archive member: {name}")
             with source:
-                write_regular(source, target, name in executable_names)
+                write_regular(source, target, name in executable_names or bool(member.mode & 0o111))
 
 
 def inventory(root: Path) -> dict:

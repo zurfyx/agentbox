@@ -48,6 +48,20 @@ test("strict manifest accepts the complete pinned release contract", (t) => {
   assert.match(output.manifest_sha256, /^[0-9a-f]{64}$/);
 });
 
+test("manifest accepts safe Codex package layout evolution", (t) => {
+  const dir = tempDir(t);
+  const path = resolve(dir, "manifest.json");
+  const value = manifest();
+  value.tools.codex.allowed_members.push(
+    "codex-resources/voice/",
+    "codex-resources/voice/bin/",
+    "codex-resources/voice/bin/codex-voice-host",
+  );
+  value.tools.codex.allowed_members.sort();
+  writeManifest(path, value);
+  expectExit(state(["validate-manifest", path]), 0, "safe evolved Codex layout");
+});
+
 test("manifest version must match the packaged version authority", (t) => {
   const dir = tempDir(t);
   const path = resolve(dir, "manifest.json");
@@ -97,7 +111,7 @@ test("hostile manifest corpus is rejected", async (t) => {
         "https://releases.openai.com/codex/releases/0.154.0/%2e%2e/0.154.0/codex-package-aarch64-unknown-linux-musl.tar.gz";
     },
     "unexpected package member": (value) => {
-      value.tools.codex.allowed_members.push("bin/unreviewed");
+      value.tools.codex.allowed_members.push("outside/unreviewed");
     },
     "missing required package member": (value) => {
       value.tools.codex.allowed_members =

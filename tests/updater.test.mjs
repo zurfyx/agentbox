@@ -15,6 +15,7 @@ import {
   tempDir,
   writeExecutable,
 } from "./helpers.mjs";
+import { CODEX_MEMBERS } from "./fixtures.mjs";
 
 const INSPECTOR = resolve(ROOT, "scripts/inspect-codex-package.py");
 // The nested 197-test gate takes about 125 seconds on protected Intel macOS.
@@ -54,34 +55,67 @@ function makeArchive(dir, entries, name = "package.tar.gz") {
   return archive;
 }
 
-function inspect(archive, members) {
-  const membersFile = `${archive}.members`;
-  writeFileSync(membersFile, members.join("\n") + "\n");
-  return run("python3", [
+function inspect(archive, members = null) {
+  const args = [
     INSPECTOR,
     archive,
     "--version",
     VERSION,
     "--target",
     TARGET,
-    "--members-file",
-    membersFile,
-  ]);
+  ];
+  if (members !== null) {
+    const membersFile = `${archive}.members`;
+    writeFileSync(membersFile, members.join("\n") + "\n");
+    args.push("--members-file", membersFile);
+  }
+  return run("python3", args);
 }
 
 test("safe package inspector accepts metadata without executing payloads", (t) => {
   const dir = tempDir(t);
   const marker = resolve(dir, "executed");
   const payload = `#!/bin/sh\ntouch '${marker}'\n`;
-  const members = ["codex-package.json", "bin/codex"];
-  const archive = makeArchive(dir, [
-    { name: "codex-package.json", data: METADATA },
-    { name: "bin/codex", data: payload },
-  ]);
-  const result = inspect(archive, members);
+  const entries = CODEX_MEMBERS.map((name) => ({
+    name,
+    data: name === "codex-package.json" ? METADATA : name === "bin/codex" ? payload : "fixture",
+    type: name.endsWith("/") ? "dir" : "file",
+  }));
+  const archive = makeArchive(dir, entries);
+  const result = inspect(archive, CODEX_MEMBERS);
   expectExit(result, 0, "safe package inspection");
-  assert.equal(JSON.parse(result.stdout).members, 2);
+  assert.equal(JSON.parse(result.stdout).members, CODEX_MEMBERS.length);
   assert.equal(existsSync(marker), false);
+});
+
+test("safe package inspector discovers canonical package layout evolution", (t) => {
+  const dir = tempDir(t);
+  const members = [
+    ...CODEX_MEMBERS.map((name) => ({
+      name,
+      data: name === "codex-package.json" ? METADATA : "fixture",
+      type: name.endsWith("/") ? "dir" : "file",
+    })),
+    { name: "codex-resources/voice/", type: "dir" },
+    { name: "codex-resources/voice/bin/", type: "dir" },
+    { name: "codex-resources/voice/bin/codex-voice-host", data: "voice" },
+  ];
+  const archive = makeArchive(dir, members);
+  const result = inspect(archive);
+  expectExit(result, 0, "safe package layout discovery");
+  assert.deepEqual(
+    JSON.parse(result.stdout).allowed_members,
+    members.map((item) => item.name).sort(),
+  );
+
+  const outside = makeArchive(
+    dir,
+    [...members, { name: "unexpected-root/payload", data: "no" }],
+    "outside.tar.gz",
+  );
+  const rejected = inspect(outside);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /outside approved roots/);
 });
 
 test("safe package inspector rejects links, devices, FIFOs, and duplicates", async (t) => {
@@ -157,6 +191,8 @@ test("vendor updater and workflow allowlist only release-inputs.json", () => {
   assert.match(updater, /Claude channel moved backwards/);
   assert.match(updater, /Codex channel moved backwards/);
   assert.match(updater, /metadata changed without a version change/);
+  assert.match(updater, /Codex package member sets differ across Linux platforms/);
+  assert.match(updater, /\.tools\.codex\.allowed_members = \$codex_members/);
   const workflow = readFileSync(resolve(ROOT, ".github/workflows/update.yml"), "utf8");
   assert.match(workflow, /\(\(\$\{#changed\[@\]\} != 1\)\)/);
   assert.match(workflow, /"\$\{changed\[0\]\}" != release-inputs\.json/);
@@ -165,6 +201,7 @@ test("vendor updater and workflow allowlist only release-inputs.json", () => {
   assert.match(workflow, /expected_author="\$APP_SLUG\[bot\]"/);
   assert.match(workflow, /headRefOid/);
   assert.match(workflow, /--force-with-lease="refs\/heads\/\$branch:\$remote_oid"/);
+  assert.match(workflow, /del result\["tools"\]\["codex"\]\["allowed_members"\]/);
 });
 
 test("updater --write changes only vendor inputs and retains source sentinels", (t) => {
@@ -190,6 +227,14 @@ test("updater --write changes only vendor inputs and retains source sentinels", 
   const curl = resolve(fakeBin, "curl");
   const claudeSha = "1".repeat(64);
   const codexSha = "2".repeat(64);
+  const storedInputs = JSON.parse(readFileSync(resolve(tree, "release-inputs.json")));
+  const nextPatch = (version) => {
+    const parts = version.split(".").map(Number);
+    parts[2] += 1;
+    return parts.join(".");
+  };
+  const claudeVersion = nextPatch(storedInputs.tools.claude.version);
+  const codexVersion = nextPatch(storedInputs.tools.codex.version);
   writeExecutable(
     curl,
     `#!/bin/bash
@@ -204,12 +249,12 @@ case " $* " in
     ;;
   *)
     case "$url" in
-      */claude-code-releases/latest) printf '2.1.273\\n' ;;
-      */2.1.273/manifest.json)
-        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"modsCommit":"","platforms":{"linux-arm64":{"binary":"claude","checksum":"${claudeSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${claudeSha}","size":101}},"sdkCompat":{},"version":"2.1.273"}'
+      */claude-code-releases/latest) printf '${claudeVersion}\\n' ;;
+      */${claudeVersion}/manifest.json)
+        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"modsCommit":"","platforms":{"linux-arm64":{"binary":"claude","checksum":"${claudeSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${claudeSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
         ;;
       */codex/channels/latest)
-        printf '%s\\n' '{"assets":[{"browser_download_url":"https://releases.openai.com/codex/releases/0.155.0/codex-package-aarch64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-aarch64-unknown-linux-musl.tar.gz"},{"browser_download_url":"https://releases.openai.com/codex/releases/0.155.0/codex-package-x86_64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-x86_64-unknown-linux-musl.tar.gz"}],"tag_name":"rust-v0.155.0"}'
+        printf '%s\\n' '{"assets":[{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-aarch64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-aarch64-unknown-linux-musl.tar.gz"},{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-x86_64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-x86_64-unknown-linux-musl.tar.gz"}],"tag_name":"rust-v${codexVersion}"}'
         ;;
       *) exit 22 ;;
     esac
@@ -233,8 +278,8 @@ esac
   }
   const inputs = JSON.parse(readFileSync(resolve(tree, "release-inputs.json")));
   assert.equal(inputs.agentbox_version, "0.0.0");
-  assert.equal(inputs.tools.claude.version, "2.1.273");
-  assert.equal(inputs.tools.codex.version, "0.155.0");
+  assert.equal(inputs.tools.claude.version, claudeVersion);
+  assert.equal(inputs.tools.codex.version, codexVersion);
   assert.equal(JSON.parse(readFileSync(resolve(tree, "package.json"))).version, "0.0.0");
   const lock = JSON.parse(readFileSync(resolve(tree, "package-lock.json")));
   assert.equal(lock.version, "0.0.0");

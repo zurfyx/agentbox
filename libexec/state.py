@@ -31,11 +31,13 @@ IMAGE_RE = re.compile(r"^ghcr\.io/zurfyx/agentbox-runtime@sha256:[0-9a-f]{64}$")
 DEV_IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 PLATFORMS = ("linux/arm64", "linux/amd64")
 MAX_ARTIFACT_SIZE = 512 * 1024 * 1024
-EXPECTED_CODEX_MEMBERS = [
+REQUIRED_CODEX_MEMBERS = {
     "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
     "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
     "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
-]
+}
+ALLOWED_CODEX_MEMBER_ROOTS = {"bin", "codex-path", "codex-resources"}
+MAX_CODEX_MEMBERS = 128
 
 class StateError(Exception):
     pass
@@ -66,6 +68,33 @@ def sha256(value: Any, where: str) -> str:
     value = string(value, where)
     if not SHA256_RE.fullmatch(value):
         fail(f"{where} must be a lowercase SHA-256")
+    return value
+
+def validate_codex_members(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value or len(value) > MAX_CODEX_MEMBERS:
+        fail(f"tools.codex.allowed_members must contain 1 to {MAX_CODEX_MEMBERS} entries")
+    if not all(isinstance(item, str) for item in value) or len(value) != len(set(value)):
+        fail("tools.codex.allowed_members must contain unique strings")
+    if value != sorted(value, key=lambda item: item.encode("utf-8")):
+        fail("tools.codex.allowed_members must be bytewise sorted")
+    aliases: set[str] = set()
+    for item in value:
+        if not item or len(item.encode("utf-8")) > 256 or "\\" in item or item.startswith("/"):
+            fail(f"tools.codex.allowed_members contains an unsafe path: {item!r}")
+        clean = item.removesuffix("/")
+        path = PurePosixPath(clean)
+        if (not clean or path.as_posix() != clean or any(part in {"", ".", ".."} for part in path.parts)
+                or unicodedata.normalize("NFC", item) != item):
+            fail(f"tools.codex.allowed_members contains a noncanonical path: {item!r}")
+        if clean != "codex-package.json" and path.parts[0] not in ALLOWED_CODEX_MEMBER_ROOTS:
+            fail(f"tools.codex.allowed_members contains a path outside approved roots: {item!r}")
+        alias = clean.casefold()
+        if alias in aliases:
+            fail(f"tools.codex.allowed_members contains a case-fold collision: {item!r}")
+        aliases.add(alias)
+    missing = REQUIRED_CODEX_MEMBERS - set(value)
+    if missing:
+        fail(f"tools.codex.allowed_members is missing required members: {sorted(missing)!r}")
     return value
 
 def https_url(value: Any, host: str, prefix: str, where: str) -> str:
@@ -134,9 +163,7 @@ def validate_manifest_data(value: Any, expected_version: str, development: bool 
         if tool == "codex":
             if spec["layout_version"] != 1 or spec["entrypoint"] != "bin/codex":
                 fail("tools.codex package layout is unsupported")
-            members = spec["allowed_members"]
-            if members != EXPECTED_CODEX_MEMBERS:
-                fail("tools.codex.allowed_members does not match the reviewed 11-member package layout")
+            validate_codex_members(spec["allowed_members"])
         tool_version = string(spec["version"], f"tools.{tool}.version")
         if not VERSION_RE.fullmatch(tool_version):
             fail(f"tools.{tool}.version is not a semantic version")
