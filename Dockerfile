@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.title="Agentbox runtime" \
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-       bash ca-certificates git jq less openssh-client python3 ripgrep \
+       bash ca-certificates git jq less nodejs openssh-client python3 ripgrep \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 1000 node \
   && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash node \
