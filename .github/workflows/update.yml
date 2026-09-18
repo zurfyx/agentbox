@@ -375,7 +375,7 @@ jobs:
         run: |
           branch=automation/vendor-update
           expected_author="$APP_SLUG[bot]"
-          existing=$(gh pr list --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+          existing=$(gh pr list --head "$branch" --state open \
             --json author,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,number)
           count=$(jq 'length' <<<"$existing")
           ((count <= 1)) || { echo "multiple open update PRs use $branch" >&2; exit 1; }
@@ -413,7 +413,7 @@ jobs:
           test "$staged" = release-inputs.json
           git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -m "$expected_message"
           authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-          existing=$(gh pr list --head "$GITHUB_REPOSITORY_OWNER:$branch" --state open \
+          existing=$(gh pr list --head "$branch" --state open \
             --json author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,number)
           count=$(jq 'length' <<<"$existing")
           ((count <= 1)) || { echo "multiple open update PRs use $branch" >&2; exit 1; }
