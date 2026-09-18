@@ -374,7 +374,7 @@ jobs:
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           branch=automation/vendor-update
-          expected_author="$APP_SLUG[bot]"
+          expected_pr_author="app/$APP_SLUG"
           existing=$(gh pr list --head "$branch" --state open \
             --json author,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,number)
           count=$(jq 'length' <<<"$existing")
@@ -382,7 +382,7 @@ jobs:
           if ((count == 0)); then
             exit 0
           fi
-          jq -e --arg author "$expected_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
+          jq -e --arg author "$expected_pr_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
             .[0].author.login == $author and .[0].baseRefName == "main" and
             .[0].headRefName == $branch and .[0].headRepositoryOwner.login == $owner and
             .[0].isCrossRepository == false
@@ -402,11 +402,12 @@ jobs:
         run: |
           branch=automation/vendor-update
           [[ "$APP_SLUG" =~ ^[A-Za-z0-9_-]+$ ]]
-          expected_author="$APP_SLUG[bot]"
-          expected_email="$APP_SLUG[bot]@users.noreply.github.com"
+          expected_pr_author="app/$APP_SLUG"
+          expected_commit_author="$APP_SLUG[bot]"
+          expected_commit_email="$APP_SLUG[bot]@users.noreply.github.com"
           expected_message="Update pinned vendor versions"
-          git config user.name "$expected_author"
-          git config user.email "$expected_email"
+          git config user.name "$expected_commit_author"
+          git config user.email "$expected_commit_email"
           git switch -c "$branch"
           git add -- release-inputs.json
           staged=$(git diff --cached --name-only | LC_ALL=C sort)
@@ -418,7 +419,7 @@ jobs:
           count=$(jq 'length' <<<"$existing")
           ((count <= 1)) || { echo "multiple open update PRs use $branch" >&2; exit 1; }
           if ((count == 1)); then
-            jq -e --arg author "$expected_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
+            jq -e --arg author "$expected_pr_author" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg branch "$branch" '
               .[0].author.login == $author and .[0].baseRefName == "main" and
               .[0].headRefName == $branch and .[0].headRepositoryOwner.login == $owner and
               .[0].isCrossRepository == false
@@ -439,7 +440,7 @@ jobs:
               local_tree=$(git rev-parse 'HEAD^{tree}')
               local_parent=$(git rev-parse 'HEAD^')
               jq -e --arg tree "$local_tree" --arg parent "$local_parent" \
-                --arg author "$expected_author" --arg email "$expected_email" --arg message "$expected_message" '
+                --arg author "$expected_commit_author" --arg email "$expected_commit_email" --arg message "$expected_message" '
                 .tree.sha == $tree and (.parents | length) == 1 and .parents[0].sha == $parent and
                 .author.name == $author and .author.email == $email and
                 .committer.name == $author and .committer.email == $email and .message == $message
