@@ -64,6 +64,15 @@ EOF
 cat > "$tmp_dir/package/codex-package.json" << EOF
 {"layoutVersion":1,"version":"$VERSION","target":"$target","variant":"codex","entrypoint":"bin/codex","resourcesDir":"codex-resources","pathDir":"codex-path"}
 EOF
+while IFS= read -r member; do
+  path="$tmp_dir/package/${member%/}"
+  if [[ $member == */ ]]; then
+    mkdir -p "$path"
+  elif [[ ! -e $path ]]; then
+    mkdir -p "$(dirname -- "$path")"
+    printf 'fixture\n' > "$path"
+  fi
+done < <(jq -r '.tools.codex.allowed_members[]' release-inputs.json)
 chmod 0555 \
   "$tmp_dir/downloads/claude" \
   "$tmp_dir/package/bin/codex" \
