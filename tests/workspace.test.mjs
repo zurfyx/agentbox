@@ -386,7 +386,11 @@ test("workspace Docker vector is scoped, ordered, and credential-minimal", async
   });
 
   await t.test("credential helper lookup is skipped only in workspace mode", () => {
-    const helper = resolve(prepared.dir, "fixed-gh-candidate");
+    const brewPrefix = resolve(prepared.dir, "custom homebrew");
+    const helper = resolve(brewPrefix, "Cellar/gh/2.98.0/bin/gh");
+    mkdirSync(resolve(brewPrefix, "Cellar/gh/2.98.0/bin"), { recursive: true });
+    mkdirSync(resolve(brewPrefix, "bin"), { recursive: true });
+    symlinkSync("../Cellar/gh/2.98.0/bin/gh", resolve(brewPrefix, "bin/gh"));
     const helperArgv = resolve(prepared.dir, "fixed-gh-candidate.argv");
     writeExecutable(
       helper,
@@ -405,7 +409,7 @@ printf '%s\\n' 'fixed-path-gh-secret'
       ["--workspace-only", "claude"],
       workspaceEngine,
       workspace,
-      { AGENTBOX_TEST_GH_CANDIDATES: helper, GH_TOKEN: null },
+      { AGENTBOX_TEST_BREW_PREFIX: brewPrefix, GH_TOKEN: null },
     );
     expectExit(
       workspaceResult,
@@ -426,7 +430,7 @@ printf '%s\\n' 'fixed-path-gh-secret'
     );
     expectExit(
       launch(prepared, ["claude"], normalEngine, workspace, {
-        AGENTBOX_TEST_GH_CANDIDATES: helper,
+        AGENTBOX_TEST_BREW_PREFIX: brewPrefix,
         GH_TOKEN: null,
       }),
       42,
@@ -444,6 +448,41 @@ printf '%s\\n' 'fixed-path-gh-secret'
       /GH_TOKEN=fixed-path-gh-secret/,
     );
   });
+});
+
+test("custom Homebrew prefix owns the update command", (t) => {
+  const dir = tempDir(t);
+  const prefix = resolve(dir, "custom homebrew");
+  const brewLog = resolve(dir, "brew.log");
+  const agentboxLog = resolve(dir, "agentbox.log");
+  mkdirSync(resolve(prefix, "bin"), { recursive: true });
+  mkdirSync(resolve(prefix, "opt/agentbox/bin"), { recursive: true });
+  writeExecutable(
+    resolve(prefix, "bin/brew"),
+    `#!/bin/sh
+printf '%s\n' "$*" >> '${brewLog}'
+if [ "$1" = upgrade ] && [ "$2" = agentbox ]; then exit 0; fi
+if [ "$1" = --prefix ] && [ "$2" = agentbox ]; then printf '%s\n' '${prefix}/opt/agentbox'; exit 0; fi
+exit 64
+`,
+  );
+  writeExecutable(
+    resolve(prefix, "opt/agentbox/bin/agentbox"),
+    `#!/bin/sh
+printf '%s\n' "$*" > '${agentboxLog}'
+`,
+  );
+
+  const result = run(CLI, ["update"], {
+    env: {
+      AGENTBOX_TEST_BREW_PREFIX: prefix,
+      AGENTBOX_TEST_MODE: "1",
+      HOME: resolve(dir, "home"),
+    },
+  });
+  expectExit(result, 0, "custom-prefix update");
+  assert.equal(readFileSync(brewLog, "utf8"), "upgrade agentbox\n--prefix agentbox\n");
+  assert.equal(readFileSync(agentboxLog, "utf8"), "setup\n");
 });
 
 test("workspace root discovery handles physical, standard Git, and linked worktrees", async (t) => {

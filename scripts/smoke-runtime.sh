@@ -106,6 +106,8 @@ jq -cS \
   ' release-inputs.json > "$tmp_dir/manifest.json"
 
 common=(--rm --platform "$platform" --network none --read-only)
+docker run "${common[@]}" --entrypoint /usr/bin/node "$image" --input-type=module -e \
+  'import {createHash} from "node:crypto"; import {rmSync} from "node:fs"; if (!createHash || !rmSync) process.exit(1)'
 docker run "${common[@]}" \
   --mount "type=bind,src=$tmp_dir/manifest.json,dst=/run/agentbox/manifest.json,readonly" \
   --mount "type=bind,src=$tmp_dir/downloads,dst=/run/agentbox/downloads,readonly" \

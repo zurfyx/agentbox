@@ -383,6 +383,7 @@ test("release workflow smokes the exact entrypoint with step-scoped tokens", () 
 
 test("the public image is payload-free and non-root", () => {
   const dockerfile = read("Dockerfile");
+  const smoke = read("scripts/smoke-runtime.sh");
   assert.doesNotMatch(
     dockerfile,
     /npm\s+(?:i|install).*(?:@anthropic-ai\/claude-code|@openai\/codex)/i,
@@ -390,6 +391,9 @@ test("the public image is payload-free and non-root", () => {
   assert.doesNotMatch(dockerfile, /COPY\s+.*(?:claude|codex).*(?:\/usr\/local\/bin|\/opt)/i);
   assert.match(dockerfile, /^USER\s+(?!root\b)\S+/m);
   assert.match(dockerfile, /runtime/);
+  assert.match(dockerfile, /\bnodejs\b/);
+  assert.match(smoke, /--entrypoint \/usr\/bin\/node/);
+  assert.match(smoke, /node:crypto/);
 });
 
 test("completions are static data and preserve the global-prefix boundary", async (t) => {

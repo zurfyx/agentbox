@@ -36,6 +36,21 @@ else
 fi
 LAUNCHER_PATH="$(cd -P -- "$(dirname -- "$LAUNCHER_PATH")" && pwd)/$(basename -- "$LAUNCHER_PATH")"
 readonly LAUNCHER_PATH
+PACKAGED_BREW_PREFIX=""
+if [[ $TEST_MODE == 1 && -n ${AGENTBOX_TEST_BREW_PREFIX:-} ]]; then
+  PACKAGED_BREW_PREFIX="$AGENTBOX_TEST_BREW_PREFIX"
+elif [[ $SOURCE_CHECKOUT == 0 ]]; then
+  case "$HOST_DIR" in
+    */Cellar/agentbox/*/libexec/agentbox)
+      PACKAGED_BREW_PREFIX="${HOST_DIR%%/Cellar/agentbox/*}"
+      ;;
+  esac
+fi
+if [[ -n $PACKAGED_BREW_PREFIX && ($PACKAGED_BREW_PREFIX != /* || ! -d $PACKAGED_BREW_PREFIX) ]]; then
+  printf 'agentbox: installed Homebrew prefix is invalid\n' >&2
+  exit 70
+fi
+readonly PACKAGED_BREW_PREFIX
 
 resolve_manifest() {
   local candidate
@@ -69,17 +84,21 @@ trusted_helper_path() {
     printf '%s\n' "$candidate"
     return
   fi
-  case "$candidate" in
-    /opt/homebrew/bin/*) cellar=/opt/homebrew/Cellar ;;
-    /usr/local/bin/*) cellar=/usr/local/Cellar ;;
-    /usr/bin/* | /bin/*)
-      target="$(cd -P -- "$(dirname -- "$candidate")" && pwd)/$(basename -- "$candidate")"
-      [[ $target == /usr/bin/* || $target == /bin/* ]] || return 1
-      printf '%s\n' "$target"
-      return
-      ;;
-    *) return 1 ;;
-  esac
+  if [[ -n $PACKAGED_BREW_PREFIX && $candidate == "$PACKAGED_BREW_PREFIX"/bin/* ]]; then
+    cellar="$PACKAGED_BREW_PREFIX/Cellar"
+  else
+    case "$candidate" in
+      /opt/homebrew/bin/*) cellar=/opt/homebrew/Cellar ;;
+      /usr/local/bin/*) cellar=/usr/local/Cellar ;;
+      /usr/bin/* | /bin/*)
+        target="$(cd -P -- "$(dirname -- "$candidate")" && pwd)/$(basename -- "$candidate")"
+        [[ $target == /usr/bin/* || $target == /bin/* ]] || return 1
+        printf '%s\n' "$target"
+        return
+        ;;
+      *) return 1 ;;
+    esac
+  fi
   target="$(/usr/bin/readlink "$candidate")" || return 1
   if [[ $target != /* ]]; then
     target="$(cd -P -- "$(dirname -- "$candidate")/$(dirname -- "$target")" && pwd)/$(basename -- "$target")"
@@ -98,7 +117,10 @@ resolve_python() {
     return
   fi
   local candidate
-  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  local -a candidates=()
+  [[ -z $PACKAGED_BREW_PREFIX ]] || candidates+=("$PACKAGED_BREW_PREFIX/bin/python3")
+  candidates+=(/opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3)
+  for candidate in "${candidates[@]}"; do
     candidate="$(trusted_helper_path "$candidate" python3 2> /dev/null || true)"
     [[ -n $candidate ]] && {
       printf '%s\n' "$candidate"
@@ -119,7 +141,10 @@ resolve_engine() {
     return
   fi
   local candidate
-  for candidate in /Applications/Docker.app/Contents/Resources/bin/docker /opt/homebrew/bin/docker /usr/local/bin/docker /usr/bin/docker; do
+  local -a candidates=(/Applications/Docker.app/Contents/Resources/bin/docker)
+  [[ -z $PACKAGED_BREW_PREFIX ]] || candidates+=("$PACKAGED_BREW_PREFIX/bin/docker")
+  candidates+=(/opt/homebrew/bin/docker /usr/local/bin/docker /usr/bin/docker)
+  for candidate in "${candidates[@]}"; do
     candidate="$(trusted_helper_path "$candidate" docker 2> /dev/null || true)"
     [[ -n $candidate ]] && {
       printf '%s\n' "$candidate"
@@ -322,11 +347,7 @@ update_command() {
     printf 'agentbox: update is unavailable in development mode; rebuild with scripts/dev.sh\n' >&2
     return 64
   fi
-  case "$HOST_DIR" in */Cellar/agentbox/* | */opt/agentbox/*)
-    [[ -x /opt/homebrew/bin/brew ]] && brew=/opt/homebrew/bin/brew
-    [[ -z $brew && -x /usr/local/bin/brew ]] && brew=/usr/local/bin/brew
-    ;;
-  esac
+  [[ -z $PACKAGED_BREW_PREFIX || ! -x $PACKAGED_BREW_PREFIX/bin/brew ]] || brew="$PACKAGED_BREW_PREFIX/bin/brew"
   [[ -n $brew ]] || {
     printf 'agentbox: update is available only for Homebrew; update this checkout with git, then run `agentbox setup`\n' >&2
     return 64
@@ -446,7 +467,8 @@ launch_agent() {
       if [[ $TEST_MODE == 1 && -n ${AGENTBOX_TEST_GH_CANDIDATES:-} ]]; then
         IFS=: read -r -a gh_candidates <<< "$AGENTBOX_TEST_GH_CANDIDATES"
       else
-        gh_candidates=(/opt/homebrew/bin/gh /usr/local/bin/gh /usr/bin/gh)
+        [[ -z $PACKAGED_BREW_PREFIX ]] || gh_candidates+=("$PACKAGED_BREW_PREFIX/bin/gh")
+        gh_candidates+=(/opt/homebrew/bin/gh /usr/local/bin/gh /usr/bin/gh)
       fi
       for gh in "${gh_candidates[@]}"; do
         gh="$(trusted_helper_path "$gh" gh 2> /dev/null || true)"
