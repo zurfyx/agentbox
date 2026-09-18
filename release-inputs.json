@@ -1,31 +1,116 @@
 {
-  "schema_version": 1,
   "agentbox_version": "0.0.0",
-  "runtime_protocol_version": 1,
-  "runtime": { "image_repository": "ghcr.io/zurfyx/agentbox-runtime" },
-  "tools": {
-    "claude": {
-      "version": "2.1.272",
-      "kind": "raw-executable",
-      "platforms": [
-        { "platform": "linux/arm64", "url": "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-arm64/claude", "sha256": "214a90efdd16ee0ea81132ffecced588dba394d178cc494f285ba04b5288c8de", "size": 227074288 },
-        { "platform": "linux/amd64", "url": "https://downloads.claude.ai/claude-code-releases/2.1.272/linux-x64/claude", "sha256": "d81396a668eb76fbddb49a2a5841f1b5d7af96b4c1f6500ced92f2c988f5bcd4", "size": 227115320 }
-      ]
+  "managed_files": {
+    "runtime_instructions": {
+      "path": "/usr/local/share/agentbox/instructions.md",
+      "sha256": "2ccf449972183f4b48a3917aa3f2605dbb46d93fea97dc32400c23e88807e2e0"
     },
-    "codex": {
-      "version": "0.154.0",
-      "kind": "tar.gz-package",
-      "layout_version": 1,
-      "entrypoint": "bin/codex",
-      "allowed_members": ["bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json", "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap", "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh"],
-      "platforms": [
-        { "platform": "linux/arm64", "target": "aarch64-unknown-linux-musl", "url": "https://releases.openai.com/codex/releases/0.154.0/codex-package-aarch64-unknown-linux-musl.tar.gz", "sha256": "97d93e11df72d3c26772db019e6ea8bb72c246500d46b98c760839f3240355e6", "size": 118112884 },
-        { "platform": "linux/amd64", "target": "x86_64-unknown-linux-musl", "url": "https://releases.openai.com/codex/releases/0.154.0/codex-package-x86_64-unknown-linux-musl.tar.gz", "sha256": "fc6e3e3b85f2cf7d664520ee5c66a7fe4aa12bae7d46834f47e2f165fd0d6f78", "size": 126585776 }
-      ]
+    "statusline": {
+      "path": "/usr/local/share/agentbox/statusline.sh",
+      "sha256": "ebcf9964b8f3741d56034ab95afaca4b1eb9abe78fbd2f59e9b1994cf9468501"
     }
   },
-  "managed_files": {
-    "runtime_instructions": { "path": "/usr/local/share/agentbox/instructions.md", "sha256": "2ccf449972183f4b48a3917aa3f2605dbb46d93fea97dc32400c23e88807e2e0" },
-    "statusline": { "path": "/usr/local/share/agentbox/statusline.sh", "sha256": "ebcf9964b8f3741d56034ab95afaca4b1eb9abe78fbd2f59e9b1994cf9468501" }
+  "runtime": {
+    "image_repository": "ghcr.io/zurfyx/agentbox-runtime"
+  },
+  "runtime_protocol_version": 1,
+  "schema_version": 1,
+  "tools": {
+    "claude": {
+      "kind": "raw-executable",
+      "platforms": [
+        {
+          "platform": "linux/arm64",
+          "sha256": "e9ac3df956083645578a382ad64ec304468666e362c33bfdefd803cd6ff596b0",
+          "size": 231989488,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.276/linux-arm64/claude"
+        },
+        {
+          "platform": "linux/amd64",
+          "sha256": "8a56c8a14bd3cb246e2bdb7e60aefe0f609bff78c8bbcc5ea6b1817c111c6145",
+          "size": 232059192,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.276/linux-x64/claude"
+        }
+      ],
+      "version": "2.1.276"
+    },
+    "codex": {
+      "allowed_members": [
+        "bin/",
+        "bin/codex",
+        "bin/codex-code-mode-host",
+        "codex-package.json",
+        "codex-path/",
+        "codex-path/rg",
+        "codex-resources/",
+        "codex-resources/bwrap",
+        "codex-resources/voice/",
+        "codex-resources/voice/NOTICE.md",
+        "codex-resources/voice/bin/",
+        "codex-resources/voice/bin/codex-voice-host",
+        "codex-resources/voice/lib/",
+        "codex-resources/voice/lib/gstreamer-1.0/",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstapp.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstaudioconvert.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstaudioresample.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstcoreelements.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstopus.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstrtp.so",
+        "codex-resources/voice/lib/gstreamer-1.0/libgstrtpmanager.so",
+        "codex-resources/voice/lib/libffi.so.8",
+        "codex-resources/voice/lib/libgio-2.0.so.0",
+        "codex-resources/voice/lib/libglib-2.0.so.0",
+        "codex-resources/voice/lib/libgmodule-2.0.so.0",
+        "codex-resources/voice/lib/libgobject-2.0.so.0",
+        "codex-resources/voice/lib/libgstallocators-1.0.so.0",
+        "codex-resources/voice/lib/libgstapp-1.0.so.0",
+        "codex-resources/voice/lib/libgstaudio-1.0.so.0",
+        "codex-resources/voice/lib/libgstbase-1.0.so.0",
+        "codex-resources/voice/lib/libgstnet-1.0.so.0",
+        "codex-resources/voice/lib/libgstpbutils-1.0.so.0",
+        "codex-resources/voice/lib/libgstreamer-1.0.so.0",
+        "codex-resources/voice/lib/libgstrtp-1.0.so.0",
+        "codex-resources/voice/lib/libgsttag-1.0.so.0",
+        "codex-resources/voice/lib/libgstvideo-1.0.so.0",
+        "codex-resources/voice/lib/libintl.so.8",
+        "codex-resources/voice/lib/libopus.so.0",
+        "codex-resources/voice/lib/libpcre2-8.so.0",
+        "codex-resources/voice/lib/libz.so.1",
+        "codex-resources/voice/licenses/",
+        "codex-resources/voice/licenses/LGPL-2.1.txt",
+        "codex-resources/voice/licenses/Opus.txt",
+        "codex-resources/voice/licenses/PCRE2.md",
+        "codex-resources/voice/licenses/libffi.txt",
+        "codex-resources/voice/licenses/proxy-libintl.txt",
+        "codex-resources/voice/licenses/sljit.txt",
+        "codex-resources/voice/licenses/zlib.txt",
+        "codex-resources/voice/manifest.json",
+        "codex-resources/voice/runtime.json",
+        "codex-resources/voice/sources.json",
+        "codex-resources/zsh/",
+        "codex-resources/zsh/bin/",
+        "codex-resources/zsh/bin/zsh"
+      ],
+      "entrypoint": "bin/codex",
+      "kind": "tar.gz-package",
+      "layout_version": 1,
+      "platforms": [
+        {
+          "platform": "linux/arm64",
+          "sha256": "28110b360a635fca2c4501036a8efbe0da5b7fe66153ae1f2f944d3fb4c7b5d2",
+          "size": 130236985,
+          "target": "aarch64-unknown-linux-musl",
+          "url": "https://releases.openai.com/codex/releases/0.155.0/codex-package-aarch64-unknown-linux-musl.tar.gz"
+        },
+        {
+          "platform": "linux/amd64",
+          "sha256": "135bfe1af2d8d5954c12f03bee2cf8b40dffb06f76bb0ec3bd6105de5357e009",
+          "size": 138857285,
+          "target": "x86_64-unknown-linux-musl",
+          "url": "https://releases.openai.com/codex/releases/0.155.0/codex-package-x86_64-unknown-linux-musl.tar.gz"
+        }
+      ],
+      "version": "0.155.0"
+    }
   }
 }
