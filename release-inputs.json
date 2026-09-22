@@ -21,18 +21,18 @@
       "platforms": [
         {
           "platform": "linux/arm64",
-          "sha256": "7de6cab134e48321148e30182c98614118e8f4666819412bead45865190b34ed",
-          "size": 234021104,
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.278/linux-arm64/claude"
+          "sha256": "92f2b4fd05d0bdcf7b9a0d4e0ecef4a1e4b368b290cd8fd07cff9a50013f45a2",
+          "size": 233103352,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.280/linux-arm64/claude"
         },
         {
           "platform": "linux/amd64",
-          "sha256": "5c4735937844e84f8a93306e841a5b0e12252909b07870f789b190468da147ab",
-          "size": 234119480,
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.278/linux-x64/claude"
+          "sha256": "1e08503dbdf3c2cb0d706d32f3408277388d1c76ef108673e8fe42c1b322925b",
+          "size": 233709640,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.280/linux-x64/claude"
         }
       ],
-      "version": "2.1.278"
+      "version": "2.1.280"
     },
     "codex": {
       "allowed_members": [
