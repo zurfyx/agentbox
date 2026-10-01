@@ -21,18 +21,18 @@
       "platforms": [
         {
           "platform": "linux/arm64",
-          "sha256": "24fac77749bed3d91365d6b6915aa4b824e14318ecb6bc17adbc192f01c9173d",
-          "size": 239722488,
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.285/linux-arm64/claude"
+          "sha256": "0292fa22ac2fd43e16be9d0e511ddd8347280d6e0ebaca744ef5b27e05d8d0f8",
+          "size": 241033208,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/linux-arm64/claude"
         },
         {
           "platform": "linux/amd64",
-          "sha256": "33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29",
-          "size": 240327864,
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.285/linux-x64/claude"
+          "sha256": "fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f",
+          "size": 241667256,
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/linux-x64/claude"
         }
       ],
-      "version": "2.1.285"
+      "version": "2.1.286"
     },
     "codex": {
       "allowed_members": [
@@ -97,20 +97,20 @@
       "platforms": [
         {
           "platform": "linux/arm64",
-          "sha256": "05a524a463cadf7e3e22c7f923539c0d0b74c3e78b1f5f1fab52e50e6fb3312f",
-          "size": 150270060,
+          "sha256": "20b7d673cf2b64b6c6208fa4fda06feb9dac0572da9987294b48cde1dab9d001",
+          "size": 150287681,
           "target": "aarch64-unknown-linux-musl",
-          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-aarch64-unknown-linux-musl.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.159.3/codex-package-aarch64-unknown-linux-musl.tar.gz"
         },
         {
           "platform": "linux/amd64",
-          "sha256": "9e2d29a713b94478b240dec2f10e11324cd05fad76dc43e7c639bdf8a1337a6b",
-          "size": 159961162,
+          "sha256": "3930f31ac5fca861ea3e444e2683f261190d96b63fba58e0a40a879174369cdf",
+          "size": 159936968,
           "target": "x86_64-unknown-linux-musl",
-          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-x86_64-unknown-linux-musl.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.159.3/codex-package-x86_64-unknown-linux-musl.tar.gz"
         }
       ],
-      "version": "0.159.2"
+      "version": "0.159.3"
     }
   }
 }
