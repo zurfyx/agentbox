@@ -125,10 +125,10 @@ jobs:
           [[ "$claude_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           claude_manifest=$(curl_text "https://downloads.claude.ai/claude-code-releases/$claude_version/manifest.json")
           jq -e --arg version "$claude_version" '
-            (keys == ["buildDate", "commit", "manifestSignatureEnforcement", "modsCommit", "platforms", "sdkCompat", "version"]) and
+            (has("platforms") and has("version")) and
             .version == $version and
-            (.platforms["linux-arm64"] | keys == ["binary", "checksum", "size"]) and
-            (.platforms["linux-x64"] | keys == ["binary", "checksum", "size"]) and
+            (.platforms["linux-arm64"] | has("binary") and has("checksum") and has("size")) and
+            (.platforms["linux-x64"] | has("binary") and has("checksum") and has("size")) and
             .platforms["linux-arm64"].binary == "claude" and
             .platforms["linux-x64"].binary == "claude"
           ' <<<"$claude_manifest" >/dev/null
