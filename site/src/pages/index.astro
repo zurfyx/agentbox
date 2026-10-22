@@ -1,5 +1,6 @@
 ---
 import Base from "../layouts/Base.astro";
+import ArrowLink from "../components/ArrowLink.astro";
 import Install from "../components/Install.astro";
 import Manifest from "../components/Manifest.astro";
 import Transcript from "../components/Transcript.astro";
@@ -97,19 +98,21 @@ const commands = [
   sourceCommit={release.sourceCommit}
 >
   <section class="hero wrap" aria-labelledby="hero-title">
-    <h1 id="hero-title">Run Claude Code and Codex in a pinned, non&#8209;root container.</h1>
+    <h1 id="hero-title" class="rise" style="--step: 0">
+      Run Claude Code and Codex in a pinned, non&#8209;root container.
+    </h1>
     <div class="pitch">
-      <p class="lede">
+      <p class="lede rise" style="--step: 1">
         Agentbox gives your agents a home of their own on your Mac, runs exact, checksum-verified releases of each, and
         mounts your projects at the same paths you already use.
       </p>
-      <Install />
-      <p class="then">
+      <div class="rise" style="--step: 2"><Install /></div>
+      <p class="then rise" style="--step: 3">
         Then, from any project, run <code>agentbox claude</code> or <code>agentbox codex</code>.
       </p>
-      <p class="requires">Needs macOS, Homebrew, and Docker Desktop. Apple silicon is the qualified path.</p>
+      <p class="requires rise" style="--step: 3">Needs macOS, Homebrew, and Docker Desktop. Apple silicon is the qualified path.</p>
     </div>
-    <div class="proof">
+    <div class="proof rise" style="--step: 2">
       <Transcript release={release} />
     </div>
   </section>
@@ -139,8 +142,8 @@ const commands = [
       </header>
       <ol class="flow">
         {
-          steps.map((step) => (
-            <li>
+          steps.map((step, index) => (
+            <li style={`--n: ${index}`}>
               <h3>{step.verb}</h3>
               <p>{step.text}</p>
             </li>
@@ -194,7 +197,7 @@ const commands = [
           <code>codex</code> also skip the agents’ own prompts. Treat repositories, hooks, and tool output as able to
           affect your Mac.
         </p>
-        <p><a href={`${docs}/security.md`}>Read the security model</a></p>
+        <p><ArrowLink href={`${docs}/security.md`}>Read the security model</ArrowLink></p>
       </div>
     </div>
   </section>
@@ -230,9 +233,9 @@ const commands = [
         <Install label="Two commands, then agentbox claude" />
       </div>
       <p class="links">
-        <a href={REPOSITORY_URL}>Source on GitHub</a>
-        <a href={`${docs}/usage.md`}>Usage guide</a>
-        <a href={`${REPOSITORY_URL}/releases`}>Releases</a>
+        <ArrowLink href={REPOSITORY_URL}>Source on GitHub</ArrowLink>
+        <ArrowLink href={`${docs}/usage.md`}>Usage guide</ArrowLink>
+        <ArrowLink href={`${REPOSITORY_URL}/releases`}>Releases</ArrowLink>
       </p>
     </div>
   </section>
@@ -288,6 +291,19 @@ const commands = [
     min-width: 0;
   }
 
+  /* Load: the pitch settles in order, then the transcript plays. */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      translate: 0 0.625rem;
+    }
+  }
+
+  :global(html[data-motion="ok"]) .rise {
+    animation: rise 700ms var(--ease-out) both;
+    animation-delay: calc(var(--step) * 80ms);
+  }
+
   @media (min-width: 64rem) {
     .hero {
       grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
@@ -309,15 +325,26 @@ const commands = [
   }
 
   .flow li {
+    --i: var(--n);
     position: relative;
     padding-top: var(--s-6);
-    border-top: 2px solid var(--ink);
+  }
+
+  /* The track: one segment per step, drawn left to right. */
+  .flow li::after {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 2px;
+    background: var(--ink);
+    transform-origin: left center;
   }
 
   .flow li::before {
     content: "";
     position: absolute;
-    top: -0.4375rem;
+    z-index: 1;
+    top: -0.3125rem;
     left: 0;
     width: 0.75rem;
     height: 0.75rem;
@@ -329,6 +356,51 @@ const commands = [
   .flow li:last-child::before {
     background: var(--signal);
     border-color: var(--signal);
+  }
+
+  /*
+   * Scrolling the flow into view draws each segment and sets its stop, so the
+   * sequence reads in order and lands on Activate. Only the track moves; the
+   * text is never hidden. Browsers without scroll timelines show it drawn.
+   */
+  @keyframes draw {
+    from {
+      scale: 0 1;
+    }
+  }
+
+  @keyframes stop {
+    from {
+      scale: 0.3;
+      opacity: 0;
+    }
+  }
+
+  /* Longhands on purpose: minifiers fold `animation` + `animation-timeline`
+     into a shorthand that browsers reject. */
+  @supports (animation-timeline: view()) {
+    :global(html[data-motion="ok"]) .flow li::after {
+      animation-name: draw;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: cover calc(13% + var(--i) * 7%) cover calc(20% + var(--i) * 7%);
+    }
+
+    :global(html[data-motion="ok"]) .flow li::before {
+      animation-name: stop;
+      animation-timing-function: var(--ease-out);
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: cover calc(11% + var(--i) * 7%) cover calc(15% + var(--i) * 7%);
+    }
+  }
+
+  /* Stacked on phones, each step already enters on its own. */
+  @media (max-width: 63.99rem) {
+    .flow li {
+      --i: 0;
+    }
   }
 
   .flow h3 {
@@ -457,7 +529,7 @@ const commands = [
     color: color-mix(in oklch, var(--ink), var(--signal-ink) 22%);
   }
 
-  .caveat a {
+  .caveat :global(a) {
     font-weight: 650;
     text-decoration-color: var(--signal);
   }

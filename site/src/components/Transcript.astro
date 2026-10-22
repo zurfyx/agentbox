@@ -53,8 +53,10 @@ const lines: Line[] = [
       )
     }</code></pre>
     <span class="seal" aria-hidden="true">
-      <span class="hole"></span>
-      <span>v{version}</span>
+      <span class="tag">
+        <span class="hole"></span>
+        <span>v{version}</span>
+      </span>
     </span>
   </div>
 
@@ -180,6 +182,9 @@ const lines: Line[] = [
     position: absolute;
     bottom: -0.625rem;
     right: var(--s-5);
+  }
+
+  .tag {
     display: inline-flex;
     align-items: center;
     gap: var(--s-2);
@@ -193,7 +198,27 @@ const lines: Line[] = [
     font-weight: 600;
     line-height: 1.5;
     rotate: 2deg;
+    transform-origin: 0.75rem 50%;
     box-shadow: 0 2px 0 oklch(30% 0.08 40 / 0.35);
+  }
+
+  /* Nudge the tag and it swings on its hole, then settles. */
+  @keyframes swing {
+    25% {
+      rotate: -5deg;
+    }
+    50% {
+      rotate: 4deg;
+    }
+    75% {
+      rotate: 0.5deg;
+    }
+  }
+
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .tag:hover {
+      animation: swing 900ms var(--ease-out);
+    }
   }
 
   .hole {
@@ -250,16 +275,16 @@ const lines: Line[] = [
 
   :global(html[data-motion="ok"]) .line {
     animation: arrive 420ms var(--ease-out) both;
-    animation-delay: calc(180ms + var(--i) * 55ms);
+    animation-delay: calc(320ms + var(--i) * 55ms);
   }
 
   :global(html[data-motion="ok"]) .command:not(:first-child) {
-    animation-delay: calc(380ms + var(--i) * 55ms);
+    animation-delay: calc(520ms + var(--i) * 55ms);
   }
 
   :global(html[data-motion="ok"]) .seal {
     animation: seal 640ms var(--ease-out) both;
-    animation-delay: 1150ms;
+    animation-delay: 1300ms;
   }
 
   .rewind :is(.line, .seal) {

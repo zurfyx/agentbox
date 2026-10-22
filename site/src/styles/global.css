@@ -109,6 +109,12 @@
     caret-color: var(--signal);
   }
 
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+
   body {
     font-size: 1.0625rem;
     line-height: 1.6;
