@@ -1,0 +1,191 @@
+---
+interface Props {
+  label?: string;
+}
+
+const { label = "Install with Homebrew" } = Astro.props;
+// Trust the tap before installing from it, as the README asks.
+const commands = ["brew trust zurfyx/tap", "brew install zurfyx/tap/agentbox"];
+---
+
+<div class="install">
+  <p class="label">{label}</p>
+  <div class="box">
+    <pre><code>{commands.map((command, index) => <>{index > 0 && "\n"}<span class="prompt" aria-hidden="true">$ </span>{command}</>)}</code></pre>
+    <button type="button" class="copy" data-copy={commands.join("\n")} hidden>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="icon-copy">
+        <rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"
+        ></rect>
+        <path d="M10.75 5.25V3.75a1.5 1.5 0 0 0-1.5-1.5h-5.5a1.5 1.5 0 0 0-1.5 1.5v5.5a1.5 1.5 0 0 0 1.5 1.5h1.5" fill="none" stroke="currentColor" stroke-width="1.5"></path>
+      </svg>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="icon-done">
+        <path d="m3.25 8.5 3 3 6.5-7" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+      <span class="copy-label">Copy</span>
+    </button>
+    <span class="status visually-hidden" role="status"></span>
+  </div>
+</div>
+
+<script>
+  const RESET_MS = 1600;
+
+  function selectContents(element: Element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".install .copy")) {
+    const box = button.closest(".box")!;
+    const label = button.querySelector(".copy-label")!;
+    const status = box.querySelector(".status")!;
+    let timer: number | undefined;
+    button.hidden = false;
+
+    button.addEventListener("click", async () => {
+      let message: string;
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? "");
+        button.dataset.state = "copied";
+        label.textContent = "Copied";
+        message = "Install commands copied to the clipboard.";
+      } catch {
+        // No clipboard access (insecure context, denied permission): select the
+        // commands so a manual copy is one keystroke away. The prompts are
+        // user-select: none and stay out of the selection.
+        selectContents(box.querySelector("code")!);
+        button.dataset.state = "selected";
+        label.textContent = "Press ⌘C";
+        message = "Install commands selected. Press Command C to copy.";
+      }
+      status.textContent = message;
+      clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        delete button.dataset.state;
+        label.textContent = "Copy";
+        status.textContent = "";
+      }, RESET_MS);
+    });
+  }
+</script>
+
+<style>
+  .install {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-2);
+  }
+
+  .label {
+    font-size: 0.875rem;
+    font-weight: 620;
+    color: var(--ink-2);
+  }
+
+  .box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--s-4);
+    padding: var(--s-4) var(--s-4) var(--s-4) var(--s-5);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+  }
+
+  pre {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    font-size: 0.875rem;
+    line-height: 1.85;
+    scrollbar-width: thin;
+  }
+
+  .prompt {
+    color: var(--ink-3);
+    user-select: none;
+  }
+
+  .copy {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    min-height: 2.5rem;
+    padding: 0 var(--s-4);
+    border: 0;
+    border-radius: var(--radius);
+    background: var(--signal);
+    color: var(--on-signal);
+    font-size: 0.9375rem;
+    font-weight: 680;
+    cursor: pointer;
+    transition:
+      background-color 150ms var(--ease-out),
+      scale 120ms var(--ease-out);
+  }
+
+  .copy:hover {
+    background: color-mix(in oklch, var(--signal), var(--on-signal) 10%);
+  }
+
+  .copy:active {
+    scale: 0.97;
+  }
+
+  .icon-done,
+  .copy[data-state="copied"] .icon-copy {
+    display: none;
+  }
+
+  .copy[data-state="copied"] .icon-done {
+    display: block;
+    animation: tick 260ms var(--ease-out);
+  }
+
+  @keyframes tick {
+    from {
+      opacity: 0;
+      scale: 0.6;
+    }
+  }
+
+  /* Narrow phones: the command needs the room, the icon carries the action. */
+  @media (max-width: 26rem) {
+    .box {
+      gap: var(--s-3);
+      padding-left: var(--s-4);
+    }
+
+    pre {
+      font-size: 0.8125rem;
+      font-stretch: 75%;
+    }
+
+    .copy {
+      width: 2.75rem;
+      min-height: 2.75rem;
+      padding: 0;
+      justify-content: center;
+    }
+
+    .copy-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .copy[data-state="copied"] .icon-done {
+      animation-duration: 1ms;
+    }
+  }
+</style>

@@ -1,0 +1,224 @@
+/*
+ * Agentbox: a sealed container with a declared manifest. Cool slate paper and
+ * ink, one safety-orange signal used for seals, actions, and focus.
+ */
+
+@layer reset, base, layout, components, utilities;
+
+@layer reset {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  * {
+    margin: 0;
+  }
+
+  html {
+    -webkit-text-size-adjust: none;
+    text-size-adjust: none;
+  }
+
+  img,
+  svg {
+    display: block;
+    max-width: 100%;
+  }
+
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  table {
+    border-collapse: collapse;
+  }
+
+  /* Components set display on JS-only controls; hidden must still win. */
+  [hidden] {
+    display: none !important;
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+
+    /* Neutrals lean slate; chroma drops toward the extremes. */
+    --bg: light-dark(oklch(97.4% 0.006 250), oklch(18.5% 0.017 255));
+    --surface: light-dark(oklch(99.2% 0.003 250), oklch(22.5% 0.019 255));
+    --ink: light-dark(oklch(23% 0.03 258), oklch(94% 0.008 250));
+    --ink-2: light-dark(oklch(44% 0.026 256), oklch(76% 0.018 250));
+    --ink-3: light-dark(oklch(50% 0.022 255), oklch(66% 0.018 252));
+    --rule: light-dark(oklch(88.5% 0.011 250), oklch(30% 0.02 255));
+    --rule-strong: light-dark(oklch(78% 0.016 252), oklch(42% 0.022 255));
+    --wash: light-dark(oklch(94.5% 0.009 250), oklch(25% 0.02 255));
+
+    /* Safety orange: a fill, a mark, and (darker) a text colour. */
+    --signal: light-dark(oklch(66% 0.19 44), oklch(72% 0.17 50));
+    --signal-ink: light-dark(oklch(51% 0.165 40), oklch(79% 0.13 56));
+    --on-signal: oklch(21% 0.045 42);
+    --signal-wash: light-dark(oklch(95% 0.03 55), oklch(28% 0.045 45));
+
+    /* The terminal stays dark in both themes; in dark mode it sinks below the page. */
+    --term-bg: light-dark(oklch(22.5% 0.026 258), oklch(14.5% 0.015 258));
+    --term-edge: light-dark(oklch(22.5% 0.026 258), oklch(31% 0.02 255));
+    --term-fg: oklch(92% 0.01 250);
+    --term-dim: oklch(71% 0.02 252);
+    --term-prompt: oklch(78% 0.13 56);
+    --term-key: oklch(84% 0.05 230);
+    --term-mark: oklch(33% 0.05 50);
+
+    --font-sans: var(--font-archivo), "Helvetica Neue", Arial, sans-serif;
+    --font-mono: var(--font-martian), "SFMono-Regular", Menlo, monospace;
+
+    /* 4px base. */
+    --s-1: 0.25rem;
+    --s-2: 0.5rem;
+    --s-3: 0.75rem;
+    --s-4: 1rem;
+    --s-5: 1.5rem;
+    --s-6: 2rem;
+    --s-7: 3rem;
+    --s-8: 4rem;
+    --s-9: 6rem;
+    --s-10: 8rem;
+
+    --measure: 66ch;
+    --gutter: clamp(1.25rem, 4.5vw, 3rem);
+    --page: 76rem;
+    --radius: 0.375rem;
+    --radius-lg: 0.75rem;
+
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  html {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 100%;
+    scroll-padding-top: var(--s-6);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    scrollbar-color: var(--rule-strong) var(--bg);
+    accent-color: var(--signal);
+    caret-color: var(--signal);
+  }
+
+  body {
+    font-size: 1.0625rem;
+    line-height: 1.6;
+    font-stretch: 100%;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: var(--signal);
+    color: var(--on-signal);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-weight: 780;
+    font-stretch: 112%;
+    line-height: 1.05;
+    letter-spacing: -0.022em;
+    text-wrap: balance;
+  }
+
+  p,
+  li,
+  dd,
+  td {
+    text-wrap: pretty;
+  }
+
+  a {
+    color: inherit;
+    text-decoration-line: underline;
+    text-decoration-color: var(--rule-strong);
+    text-decoration-thickness: 0.08em;
+    text-underline-offset: 0.22em;
+    transition: text-decoration-color 150ms var(--ease-out), color 150ms var(--ease-out);
+  }
+
+  a:hover {
+    text-decoration-color: var(--signal);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+    font-stretch: 87.5%;
+    font-size: 0.84em;
+    font-variant-ligatures: none;
+  }
+
+  :not(pre) > code {
+    padding: 0.08em 0.32em;
+    border-radius: 0.25rem;
+    background: var(--wash);
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+}
+
+@layer layout {
+  .wrap {
+    width: min(100% - 2 * var(--gutter), var(--page));
+    margin-inline: auto;
+  }
+
+  .section {
+    padding-block: clamp(var(--s-8), 11vw, var(--s-10));
+    border-top: 1px solid var(--rule);
+  }
+
+  .section-head {
+    display: grid;
+    gap: var(--s-4);
+    max-width: 46rem;
+    margin-bottom: clamp(var(--s-6), 5vw, var(--s-7));
+  }
+
+  .section-head h2 {
+    font-size: clamp(2rem, 1.2rem + 3vw, 3.25rem);
+  }
+
+  .section-head p {
+    color: var(--ink-2);
+    font-size: 1.1875rem;
+    max-width: var(--measure);
+  }
+}
+
+@layer utilities {
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}

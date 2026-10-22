@@ -1,0 +1,249 @@
+---
+import { REPOSITORY_URL, runtimeDigest, shortDigest, type Release, type Tool } from "../lib/release";
+
+interface Props {
+  release: Release;
+}
+
+const { release } = Astro.props;
+const bytes = new Intl.NumberFormat("en-US");
+const host = (url: string) => new URL(url).host;
+const tools: Array<{ name: string; tool: Tool }> = [
+  { name: "Claude Code", tool: release.claude },
+  { name: "Codex", tool: release.codex },
+];
+const digest = runtimeDigest(release.runtimeImage);
+const inputs = `${REPOSITORY_URL}/blob/${release.sourceCommit}/release-inputs.json`;
+---
+
+<div class="sheet">
+  <div class="scroll" role="region" aria-labelledby="manifest-caption" tabindex="0">
+    <table>
+      <caption id="manifest-caption" class="visually-hidden">Contents of the Agentbox {release.version} release manifest</caption>
+      <thead>
+        <tr>
+          <th scope="col">Item</th>
+          <th scope="col">Version</th>
+          <th scope="col">Platform</th>
+          <th scope="col" class="num">Bytes</th>
+          <th scope="col">SHA-256</th>
+          <th scope="col">Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="group">
+          <th scope="row">Runtime image</th>
+          <td class="mono">{release.version}</td>
+          <td class="mono">linux/arm64, amd64</td>
+          <td class="num muted"><span aria-hidden="true">–</span><span class="visually-hidden">Not applicable</span></td>
+          <td class="mono digest" title={digest}>{shortDigest(digest)}</td>
+          <td class="mono">ghcr.io</td>
+        </tr>
+        {
+          tools.map(({ name, tool }) =>
+            tool.platforms.map((artifact, index) => (
+              <tr class:list={{ group: index === 0 }}>
+                {index === 0 ? (
+                  <th scope="row" rowspan={tool.platforms.length}>
+                    {name}
+                  </th>
+                ) : null}
+                {index === 0 ? (
+                  <td class="mono" rowspan={tool.platforms.length}>
+                    {tool.version}
+                  </td>
+                ) : null}
+                <td class="mono">{artifact.platform}</td>
+                <td class="num mono">{bytes.format(artifact.size)}</td>
+                <td class="mono digest" title={artifact.sha256}>
+                  {shortDigest(artifact.sha256)}
+                </td>
+                <td class="mono">
+                  <a href={artifact.url}>{host(artifact.url)}</a>
+                </td>
+              </tr>
+            )),
+          )
+        }
+      </tbody>
+    </table>
+  </div>
+  <!-- The same rows for phones, where six columns can't fit. -->
+  <dl class="stack">
+    <div>
+      <dt>Runtime image <span class="mono">{release.version}</span></dt>
+      <dd>
+        <span class="mono">linux/arm64, amd64</span>
+        <span class="mono digest">sha256 {shortDigest(digest)}</span>
+        <span class="mono">ghcr.io</span>
+      </dd>
+    </div>
+    {
+      tools.map(({ name, tool }) => (
+        <div>
+          <dt>
+            {name} <span class="mono">{tool.version}</span>
+          </dt>
+          {tool.platforms.map((artifact) => (
+            <dd>
+              <span class="mono">{artifact.platform}</span>
+              <span class="mono">{bytes.format(artifact.size)} bytes</span>
+              <span class="mono digest">sha256 {shortDigest(artifact.sha256)}</span>
+              <span class="mono">
+                <a href={artifact.url}>{host(artifact.url)}</a>
+              </span>
+            </dd>
+          ))}
+        </div>
+      ))
+    }
+  </dl>
+  <p class="provenance">
+    {
+      release.live
+        ? `Agentbox ${release.version}, as served by the Homebrew tap when this page was built.`
+        : `Agentbox ${release.version}, from a saved snapshot. The current release may be newer.`
+    }{" "}
+    Read from the release's provenance record and <a href={inputs}><code>release-inputs.json</code></a> at
+    <a href={`${REPOSITORY_URL}/commit/${release.sourceCommit}`}><code>{release.sourceCommit.slice(0, 7)}</code></a>.
+  </p>
+</div>
+
+<style>
+  .sheet {
+    display: grid;
+    gap: var(--s-4);
+  }
+
+  .scroll {
+    overflow-x: auto;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    scrollbar-width: thin;
+  }
+
+  table {
+    width: 100%;
+    min-width: 46rem;
+    font-size: 0.9375rem;
+    line-height: 1.4;
+  }
+
+  th,
+  td {
+    padding: var(--s-3) var(--s-4);
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+
+  /* Rowspans make :first-child unreliable for the outer cells. */
+  thead th:first-child,
+  tbody th {
+    padding-left: var(--s-5);
+  }
+
+  th:last-child,
+  td:last-child {
+    padding-right: var(--s-5);
+  }
+
+  thead th {
+    padding-block: var(--s-3);
+    border-bottom: 1px solid var(--rule-strong);
+    color: var(--ink-2);
+    font-size: 0.8125rem;
+    font-weight: 620;
+  }
+
+  tbody th {
+    font-weight: 680;
+  }
+
+  tr.group > * {
+    border-top: 1px solid var(--rule);
+  }
+
+  tbody tr:first-child > * {
+    border-top: 0;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-stretch: 87.5%;
+    font-size: 0.8125rem;
+    padding-top: calc(var(--s-3) + 0.1rem);
+  }
+
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .muted {
+    color: var(--ink-3);
+  }
+
+  .digest {
+    color: var(--ink-2);
+  }
+
+  .stack {
+    display: none;
+  }
+
+  @media (max-width: 40rem) {
+    .scroll {
+      display: none;
+    }
+
+    .stack {
+      display: grid;
+      border: 1px solid var(--rule-strong);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+    }
+
+    .stack > div {
+      display: grid;
+      gap: var(--s-3);
+      padding: var(--s-4) var(--s-5);
+    }
+
+    .stack > div + div {
+      border-top: 1px solid var(--rule);
+    }
+
+    .stack dt {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: var(--s-4);
+      font-weight: 680;
+    }
+
+    .stack dt .mono {
+      font-weight: 400;
+    }
+
+    .stack dd {
+      display: grid;
+      gap: 0.125rem;
+      padding-left: var(--s-3);
+      border-left: 2px solid var(--rule);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stack .mono {
+      padding-top: 0;
+      font-size: 0.78125rem;
+    }
+  }
+
+  .provenance {
+    max-width: var(--measure);
+    color: var(--ink-3);
+    font-size: 0.875rem;
+  }
+</style>
