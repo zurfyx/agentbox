@@ -34,7 +34,6 @@ MAX_ARTIFACT_SIZE = 512 * 1024 * 1024
 REQUIRED_CODEX_MEMBERS = {
     "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
     "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
-    "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
 }
 ALLOWED_CODEX_MEMBER_ROOTS = {"bin", "codex-path", "codex-resources"}
 MAX_CODEX_MEMBERS = 128

@@ -25,7 +25,6 @@ mkdir -p \
   "$tmp_dir/downloads" \
   "$tmp_dir/package/bin" \
   "$tmp_dir/package/codex-path" \
-  "$tmp_dir/package/codex-resources/zsh/bin" \
   "$tmp_dir/output"
 chmod 0777 "$tmp_dir/output"
 
@@ -57,10 +56,6 @@ cat > "$tmp_dir/package/codex-resources/bwrap" << 'EOF'
 #!/bin/sh
 exit 0
 EOF
-cat > "$tmp_dir/package/codex-resources/zsh/bin/zsh" << 'EOF'
-#!/bin/sh
-exit 0
-EOF
 cat > "$tmp_dir/package/codex-package.json" << EOF
 {"layoutVersion":1,"version":"$VERSION","target":"$target","variant":"codex","entrypoint":"bin/codex","resourcesDir":"codex-resources","pathDir":"codex-path"}
 EOF
@@ -78,8 +73,7 @@ chmod 0555 \
   "$tmp_dir/package/bin/codex" \
   "$tmp_dir/package/bin/codex-code-mode-host" \
   "$tmp_dir/package/codex-path/rg" \
-  "$tmp_dir/package/codex-resources/bwrap" \
-  "$tmp_dir/package/codex-resources/zsh/bin/zsh"
+  "$tmp_dir/package/codex-resources/bwrap"
 COPYFILE_DISABLE=1 tar -C "$tmp_dir/package" -czf "$tmp_dir/downloads/codex.tar.gz" \
   bin codex-package.json codex-path codex-resources
 
