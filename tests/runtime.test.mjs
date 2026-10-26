@@ -23,9 +23,6 @@ const MEMBERS = [
   "codex-path/rg",
   "codex-resources/",
   "codex-resources/bwrap",
-  "codex-resources/zsh/",
-  "codex-resources/zsh/bin/",
-  "codex-resources/zsh/bin/zsh",
 ];
 
 function runtime(args, options = {}) {

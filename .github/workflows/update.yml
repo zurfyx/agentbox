@@ -210,8 +210,7 @@ jobs:
           REQUIRED_CODEX_MEMBERS = {
               "bin/", "bin/codex", "bin/codex-code-mode-host", "codex-package.json",
               "codex-path/", "codex-path/rg", "codex-resources/", "codex-resources/bwrap",
-              "codex-resources/zsh/", "codex-resources/zsh/bin/", "codex-resources/zsh/bin/zsh",
-          }
+              }
           ALLOWED_CODEX_ROOTS = {"bin", "codex-path", "codex-resources"}
           SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
           SHA256 = re.compile(r"^[0-9a-f]{64}$")

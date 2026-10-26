@@ -15,9 +15,6 @@ export const CODEX_MEMBERS = [
   "codex-path/rg",
   "codex-resources/",
   "codex-resources/bwrap",
-  "codex-resources/zsh/",
-  "codex-resources/zsh/bin/",
-  "codex-resources/zsh/bin/zsh",
 ];
 
 export function manifest(overrides = {}) {

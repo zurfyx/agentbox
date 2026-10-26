@@ -26,9 +26,6 @@ REQUIRED_MEMBERS = {
     "codex-path/rg",
     "codex-resources/",
     "codex-resources/bwrap",
-    "codex-resources/zsh/",
-    "codex-resources/zsh/bin/",
-    "codex-resources/zsh/bin/zsh",
 }
 ALLOWED_ROOTS = {"bin", "codex-path", "codex-resources"}
 METADATA_KEYS = {
