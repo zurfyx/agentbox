@@ -25,6 +25,7 @@ mkdir -p \
   "$tmp_dir/downloads" \
   "$tmp_dir/package/bin" \
   "$tmp_dir/package/codex-path" \
+  "$tmp_dir/package/codex-resources" \
   "$tmp_dir/output"
 chmod 0777 "$tmp_dir/output"
 
