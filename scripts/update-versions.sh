@@ -143,10 +143,10 @@ claude_version=$(curl_text "$CLAUDE_LATEST_URL")
   die "Claude latest channel did not return a stable semantic version"
 claude_manifest=$(curl_text "$CLAUDE_RELEASE_ROOT/$claude_version/manifest.json")
 jq -e --arg version "$claude_version" '
-  (keys == ["buildDate", "commit", "manifestSignatureEnforcement", "modsCommit", "platforms", "sdkCompat", "version"]) and
+  (has("platforms") and has("version")) and
   .version == $version and
-  (.platforms["linux-arm64"] | keys == ["binary", "checksum", "size"]) and
-  (.platforms["linux-x64"] | keys == ["binary", "checksum", "size"])
+  (.platforms["linux-arm64"] | has("binary") and has("checksum") and has("size")) and
+  (.platforms["linux-x64"] | has("binary") and has("checksum") and has("size"))
 ' <<< "$claude_manifest" > /dev/null || die "Claude manifest schema changed"
 
 read_claude_field() {

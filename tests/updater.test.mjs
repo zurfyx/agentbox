@@ -254,7 +254,7 @@ case " $* " in
     case "$url" in
       */claude-code-releases/latest) printf '${claudeVersion}\\n' ;;
       */${claudeVersion}/manifest.json)
-        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"modsCommit":"","platforms":{"linux-arm64":{"binary":"claude","checksum":"${claudeSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${claudeSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
+        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"platforms":{"linux-arm64":{"binary":"claude","checksum":"${claudeSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${claudeSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
         ;;
       */codex/channels/latest)
         printf '%s\\n' '{"assets":[{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-aarch64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-aarch64-unknown-linux-musl.tar.gz"},{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-x86_64-unknown-linux-musl.tar.gz","digest":"sha256:${codexSha}","name":"codex-package-x86_64-unknown-linux-musl.tar.gz"}],"tag_name":"rust-v${codexVersion}"}'
@@ -353,7 +353,7 @@ case " $* " in
     case "$url" in
       */claude-code-releases/latest) printf '${claudeVersion}\\n' ;;
       */${claudeVersion}/manifest.json)
-        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"modsCommit":"","platforms":{"linux-arm64":{"binary":"claude","checksum":"${driftSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${driftSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
+        printf '%s\\n' '{"buildDate":"","commit":"","manifestSignatureEnforcement":false,"platforms":{"linux-arm64":{"binary":"claude","checksum":"${driftSha}","size":101},"linux-x64":{"binary":"claude","checksum":"${driftSha}","size":101}},"sdkCompat":{},"version":"${claudeVersion}"}'
         ;;
       */codex/channels/latest)
         printf '%s\\n' '{"assets":[{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-aarch64-unknown-linux-musl.tar.gz","digest":"sha256:${"2".repeat(64)}","name":"codex-package-aarch64-unknown-linux-musl.tar.gz"},{"browser_download_url":"https://releases.openai.com/codex/releases/${codexVersion}/codex-package-x86_64-unknown-linux-musl.tar.gz","digest":"sha256:${"2".repeat(64)}","name":"codex-package-x86_64-unknown-linux-musl.tar.gz"}],"tag_name":"rust-v${codexVersion}"}'
