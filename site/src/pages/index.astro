@@ -1,0 +1,596 @@
+---
+import Base from "../layouts/Base.astro";
+import ArrowLink from "../components/ArrowLink.astro";
+import Install from "../components/Install.astro";
+import Manifest from "../components/Manifest.astro";
+import Transcript from "../components/Transcript.astro";
+import { getRelease } from "../lib/get-release";
+import { REPOSITORY_URL } from "../lib/release";
+
+const release = await getRelease();
+const docs = `${REPOSITORY_URL}/blob/main/docs`;
+
+const steps = [
+  {
+    verb: "Download",
+    text: "Only the agent you launched, straight from Anthropic or OpenAI. Nothing vendor-made lives in the Agentbox image or archive.",
+  },
+  {
+    verb: "Verify",
+    text: "Exact byte length and SHA-256 against the release manifest. A mismatch stops here.",
+  },
+  {
+    verb: "Validate",
+    text: "A smoke test in a candidate container with no network, no credentials, no repository, and a read-only root.",
+  },
+  {
+    verb: "Activate",
+    text: "One checksummed selector switches atomically to an immutable snapshot. Any earlier failure leaves your current release selected.",
+  },
+];
+
+type Access = { text: string; tone?: "open" | "closed" };
+const reach: Array<{ what: string; normal: Access; scoped: Access }> = [
+  {
+    what: "The current project",
+    normal: { text: "Read/write, same path", tone: "open" },
+    scoped: { text: "Read/write, same path", tone: "open" },
+  },
+  {
+    what: "/Users and /Volumes",
+    normal: { text: "Read/write", tone: "open" },
+    scoped: { text: "Not mounted", tone: "closed" },
+  },
+  {
+    what: "/tmp",
+    normal: { text: "The host’s, read/write", tone: "open" },
+    scoped: { text: "Private, session-only", tone: "closed" },
+  },
+  {
+    what: "Agent home, ~/.agentbox",
+    normal: { text: "Read/write", tone: "open" },
+    scoped: { text: "Read/write, .ssh hidden", tone: "open" },
+  },
+  {
+    what: "Pinned agents and runtime",
+    normal: { text: "Read-only" },
+    scoped: { text: "Read-only" },
+  },
+  {
+    what: "GitHub token from gh",
+    normal: { text: "Passed in when gh is signed in", tone: "open" },
+    scoped: { text: "Withheld", tone: "closed" },
+  },
+  {
+    what: "OPENAI_API_KEY",
+    normal: { text: "Codex sessions only" },
+    scoped: { text: "Codex sessions only" },
+  },
+  {
+    what: "onhost, a shell on your Mac",
+    normal: { text: "If you set it up", tone: "open" },
+    scoped: { text: "Unavailable", tone: "closed" },
+  },
+  {
+    what: "Network",
+    normal: { text: "On", tone: "open" },
+    scoped: { text: "On", tone: "open" },
+  },
+];
+
+const commands = [
+  { command: "agentbox claude", text: "Claude Code, also the default when you run agentbox alone. Extra arguments pass straight through." },
+  { command: "agentbox codex", text: "Codex, with its approvals and sandbox bypassed." },
+  { command: "agentbox clauded", text: "Claude Code with permission prompts skipped." },
+  { command: "agentbox --workspace-only …", text: "Mount only the current project for this session." },
+  { command: "agentbox --no-update …", text: "Launch the release already selected, without preparing a newer one." },
+  { command: "agentbox codex login --device-auth", text: "Sign Codex in with a device code. Browser callback login isn’t supported." },
+  { command: "agentbox update", text: "Upgrade through Homebrew, then prepare the new release." },
+  { command: "agentbox rollback --accept-vendor-state-risk", text: "Reselect the previous release. The agents’ own state isn’t reverted." },
+  { command: "agentbox info", text: "Show installed and selected releases. Reads only." },
+  { command: "agentbox doctor", text: "Check integrity and the Docker engine. Never repairs or runs vendor code." },
+];
+---
+
+<Base
+  title="Agentbox: Claude Code and Codex in a pinned container"
+  description="Run Claude Code and Codex in a version-pinned, non-root Docker container on your Mac. Separate agent logins, checksum-verified releases, and your files at their usual paths."
+  sourceCommit={release.sourceCommit}
+>
+  <section class="hero wrap" aria-labelledby="hero-title">
+    <h1 id="hero-title" class="rise" style="--step: 0">
+      Run Claude Code and Codex in a pinned, non&#8209;root container.
+    </h1>
+    <div class="pitch">
+      <p class="lede rise" style="--step: 1">
+        Agentbox gives your agents a home of their own on your Mac, runs exact, checksum-verified releases of each, and
+        mounts your projects at the same paths you already use.
+      </p>
+      <div class="rise" style="--step: 2"><Install /></div>
+      <p class="then rise" style="--step: 3">
+        Then, from any project, run <code>agentbox claude</code> or <code>agentbox codex</code>.
+      </p>
+      <p class="requires rise" style="--step: 3">Needs macOS, Homebrew, and Docker Desktop. Apple silicon is the qualified path.</p>
+    </div>
+    <div class="proof rise" style="--step: 2">
+      <Transcript release={release} />
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="manifest-title">
+    <div class="wrap">
+      <header class="section-head">
+        <h2 id="manifest-title">Every release is a manifest.</h2>
+        <p>
+          One Agentbox release names the runtime image and both agents down to the byte. Launches never ask a
+          <code>latest</code> channel what to run, and each agent’s own updater is switched off. Only a new Agentbox release
+          changes what you run.
+        </p>
+      </header>
+      <Manifest release={release} />
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="flow-title">
+    <div class="wrap">
+      <header class="section-head">
+        <h2 id="flow-title">How a release gets onto your Mac.</h2>
+        <p>
+          The first launch prepares only the agent you asked for. Launching the other one later adds it without
+          discarding the first or anything you’ve signed in to.
+        </p>
+      </header>
+      <ol class="flow">
+        {
+          steps.map((step, index) => (
+            <li style={`--n: ${index}`}>
+              <h3>{step.verb}</h3>
+              <p>{step.text}</p>
+            </li>
+          ))
+        }
+      </ol>
+      <p class="aside">
+        Changed your mind? <code>agentbox rollback --accept-vendor-state-risk</code> reselects the previous release and holds
+        it there until you run <code>agentbox setup --reset-selector</code>.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="reach-title">
+    <div class="wrap reach">
+      <header class="section-head">
+        <h2 id="reach-title">Know exactly what the agent can reach.</h2>
+        <p>
+          By default an agent sees your files where they live, so tools and paths agree with your Mac. Add
+          <code>--workspace-only</code> to narrow a session to the project in front of you.
+        </p>
+      </header>
+      <div class="scroll" role="region" aria-labelledby="reach-caption" tabindex="0">
+        <table class="access">
+          <caption id="reach-caption" class="visually-hidden">What an agent session can access, by mode</caption>
+          <thead>
+            <tr>
+              <td></td>
+              <th scope="col">Default</th>
+              <th scope="col"><code>--workspace-only</code></th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              reach.map((row) => (
+                <tr>
+                  <th scope="row">{row.what}</th>
+                  <td data-tone={row.normal.tone}>{row.normal.text}</td>
+                  <td data-tone={row.scoped.tone}>{row.scoped.text}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="caveat">
+        <h3>It isn’t a sandbox.</h3>
+        <p>
+          Agentbox separates your agents’ identity and pins the bytes they run. In either mode an agent can still change or
+          send anything it can see, use its credentials, and reach the network. <code>clauded</code> and
+          <code>codex</code> also skip the agents’ own prompts. Treat repositories, hooks, and tool output as able to
+          affect your Mac.
+        </p>
+        <p><ArrowLink href={`${docs}/security.md`}>Read the security model</ArrowLink></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="commands-title">
+    <div class="wrap split">
+      <header class="section-head">
+        <h2 id="commands-title">Commands</h2>
+        <p>
+          <code>setup</code> and <code>doctor</code> exist, but neither is a step you need before the first launch.
+          The <a href={`${docs}/usage.md`}>usage guide</a> covers everything else.
+        </p>
+      </header>
+      <dl class="commands">
+        {
+          commands.map((entry) => (
+            <div>
+              <dt>
+                <code>{entry.command}</code>
+              </dt>
+              <dd>{entry.text}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
+
+  <section class="section closing" aria-labelledby="closing-title">
+    <div class="wrap">
+      <h2 id="closing-title">Try it on the project you have open.</h2>
+      <div class="closing-install">
+        <Install label="Two commands, then agentbox claude" />
+      </div>
+      <p class="links">
+        <ArrowLink href={REPOSITORY_URL}>Source on GitHub</ArrowLink>
+        <ArrowLink href={`${docs}/usage.md`}>Usage guide</ArrowLink>
+        <ArrowLink href={`${REPOSITORY_URL}/releases`}>Releases</ArrowLink>
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-6) clamp(var(--s-7), 5vw, var(--s-9));
+    padding-block: clamp(var(--s-6), 6vw, var(--s-8)) clamp(var(--s-8), 10vw, var(--s-10));
+  }
+
+  .pitch {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: var(--s-5);
+    max-width: 38rem;
+  }
+
+  h1 {
+    font-size: clamp(2.25rem, 1rem + 3.9vw, 4.125rem);
+    font-weight: 820;
+    font-stretch: 116%;
+    line-height: 0.98;
+    letter-spacing: -0.032em;
+    max-width: 19ch;
+  }
+
+  .lede {
+    color: var(--ink-2);
+    font-size: clamp(1.125rem, 1rem + 0.45vw, 1.3125rem);
+    line-height: 1.5;
+    margin-bottom: var(--s-2);
+  }
+
+  .then {
+    color: var(--ink-2);
+  }
+
+  .then code {
+    white-space: nowrap;
+  }
+
+  .requires {
+    margin-top: calc(-1 * var(--s-3));
+    color: var(--ink-3);
+    font-size: 0.875rem;
+  }
+
+  .proof {
+    min-width: 0;
+  }
+
+  /* Load: the pitch settles in order, then the transcript plays. */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      translate: 0 0.625rem;
+    }
+  }
+
+  :global(html[data-motion="ok"]) .rise {
+    animation: rise 700ms var(--ease-out) both;
+    animation-delay: calc(var(--step) * 80ms);
+  }
+
+  @media (min-width: 64rem) {
+    .hero {
+      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+      row-gap: var(--s-7);
+    }
+
+    .hero h1 {
+      grid-column: 1 / -1;
+    }
+  }
+
+  /* Release flow: a track, not a row of cards. */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: var(--s-6);
+    padding: 0;
+    list-style: none;
+  }
+
+  .flow li {
+    --i: var(--n);
+    position: relative;
+    padding-top: var(--s-6);
+  }
+
+  /* The track: one segment per step, drawn left to right. */
+  .flow li::after {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 2px;
+    background: var(--ink);
+    transform-origin: left center;
+  }
+
+  .flow li::before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    top: -0.3125rem;
+    left: 0;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--ink);
+  }
+
+  .flow li:last-child::before {
+    background: var(--signal);
+    border-color: var(--signal);
+  }
+
+  /*
+   * Scrolling the flow into view draws each segment and sets its stop, so the
+   * sequence reads in order and lands on Activate. Only the track moves; the
+   * text is never hidden. Browsers without scroll timelines show it drawn.
+   */
+  @keyframes draw {
+    from {
+      scale: 0 1;
+    }
+  }
+
+  @keyframes stop {
+    from {
+      scale: 0.3;
+      opacity: 0;
+    }
+  }
+
+  /* Longhands on purpose: minifiers fold `animation` + `animation-timeline`
+     into a shorthand that browsers reject. */
+  @supports (animation-timeline: view()) {
+    :global(html[data-motion="ok"]) .flow li::after {
+      animation-name: draw;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: cover calc(13% + var(--i) * 7%) cover calc(20% + var(--i) * 7%);
+    }
+
+    :global(html[data-motion="ok"]) .flow li::before {
+      animation-name: stop;
+      animation-timing-function: var(--ease-out);
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: cover calc(11% + var(--i) * 7%) cover calc(15% + var(--i) * 7%);
+    }
+  }
+
+  /* Stacked on phones, each step already enters on its own. */
+  @media (max-width: 63.99rem) {
+    .flow li {
+      --i: 0;
+    }
+  }
+
+  .flow h3 {
+    font-size: 1.5rem;
+    margin-bottom: var(--s-3);
+  }
+
+  .flow p {
+    color: var(--ink-2);
+    font-size: 0.9875rem;
+    max-width: 30ch;
+  }
+
+  .aside {
+    margin-top: var(--s-7);
+    max-width: var(--measure);
+    color: var(--ink-2);
+  }
+
+  /* Reach. */
+  .reach {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scroll {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .access {
+    width: 100%;
+    min-width: 36rem;
+    font-size: 0.9875rem;
+  }
+
+  .access th,
+  .access td {
+    padding: var(--s-3) var(--s-4) var(--s-3) 0;
+    border-bottom: 1px solid var(--rule);
+    text-align: left;
+    vertical-align: baseline;
+  }
+
+  .access thead th {
+    padding-bottom: var(--s-3);
+    border-bottom: 2px solid var(--ink);
+    font-size: 1rem;
+    font-weight: 720;
+    width: 32%;
+  }
+
+  .access thead code {
+    font-size: 0.8125rem;
+  }
+
+  /* Phones: squeeze into three columns instead of hiding one off-screen. */
+  @media (max-width: 40rem) {
+    .access {
+      min-width: 0;
+      font-size: 0.875rem;
+      line-height: 1.45;
+    }
+
+    .access thead th {
+      width: auto;
+    }
+
+    .access thead code {
+      font-size: 0.75rem;
+      font-stretch: 75%;
+    }
+
+    .access tbody th {
+      width: 34%;
+    }
+  }
+
+  .access thead td {
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .access tbody th {
+    font-weight: 600;
+  }
+
+  .access td {
+    color: var(--ink-2);
+  }
+
+  .access tbody td::before {
+    content: "";
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-right: var(--s-2);
+    border-radius: 1px;
+    vertical-align: 0.06em;
+    background: var(--rule-strong);
+  }
+
+  .access tbody td[data-tone="open"]::before {
+    background: var(--signal);
+  }
+
+  .access tbody td[data-tone="closed"]::before {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--ink-3);
+  }
+
+  .caveat {
+    display: grid;
+    gap: var(--s-3);
+    max-width: 44rem;
+    margin-top: var(--s-7);
+    padding: var(--s-5) var(--s-6);
+    border-radius: var(--radius-lg);
+    background: var(--signal-wash);
+  }
+
+  .caveat h3 {
+    font-size: 1.375rem;
+  }
+
+  .caveat p {
+    color: color-mix(in oklch, var(--ink), var(--signal-ink) 22%);
+  }
+
+  .caveat :global(a) {
+    font-weight: 650;
+    text-decoration-color: var(--signal);
+  }
+
+  /* Commands: a reference sheet beside its heading. */
+  @media (min-width: 64rem) {
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+      gap: var(--s-9);
+      align-items: start;
+    }
+
+    .split .section-head {
+      position: sticky;
+      top: var(--s-6);
+    }
+  }
+
+  .commands > div:last-child {
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .commands div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-1);
+    padding-block: var(--s-4);
+    border-top: 1px solid var(--rule);
+  }
+
+  .commands dt code {
+    padding: 0;
+    background: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    white-space: normal;
+  }
+
+  .commands dd {
+    color: var(--ink-2);
+    font-size: 0.9375rem;
+  }
+
+  /* Closing. */
+  .closing h2 {
+    font-size: clamp(2.25rem, 1.2rem + 4vw, 4.25rem);
+    font-stretch: 116%;
+    max-width: 14ch;
+  }
+
+  .closing-install {
+    max-width: 34rem;
+    margin-top: var(--s-6);
+  }
+
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2) var(--s-6);
+    margin-top: var(--s-6);
+    font-weight: 600;
+  }
+</style>

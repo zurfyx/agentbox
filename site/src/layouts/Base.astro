@@ -1,0 +1,197 @@
+---
+import { Font } from "astro:assets";
+import "../styles/global.css";
+import Logo from "../components/Logo.astro";
+import { REPOSITORY_URL } from "../lib/release";
+
+interface Props {
+  title: string;
+  description: string;
+  sourceCommit: string;
+}
+
+const { title, description, sourceCommit } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = new URL("/og.png", Astro.site);
+const docs = `${REPOSITORY_URL}/blob/main/docs`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f3f5f8" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#10151c" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Agentbox" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Agentbox: run Claude Code and Codex in a pinned, non-root container." />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <Font cssVariable="--font-archivo" preload />
+    <Font cssVariable="--font-martian" />
+
+    <!-- Content is visible by default; this only opts in to the entrance. -->
+    <script is:inline>
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        document.documentElement.dataset.motion = "ok";
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="masthead wrap">
+      <a class="brand" href="/" aria-label="Agentbox home">
+        <Logo />
+        <span class="wordmark" aria-hidden="true">agentbox</span>
+      </a>
+      <nav aria-label="Primary">
+        <ul>
+          <li><a href={`${docs}/usage.md`}>Docs</a></li>
+          <li><a href={`${docs}/security.md`}>Security</a></li>
+          <li>
+            <a class="github" href={REPOSITORY_URL}>
+              <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+                ></path>
+              </svg>
+              <span>GitHub</span>
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main">
+      <slot />
+    </main>
+
+    <footer class="colophon">
+      <div class="wrap">
+        <p>
+          Agentbox is <a href={`${REPOSITORY_URL}/blob/main/LICENSE`}>MIT licensed</a>. Claude Code is provided by
+          Anthropic PBC and Codex by OpenAI, L.L.C., each under its own <a
+            href={`${REPOSITORY_URL}/blob/main/THIRD_PARTY_NOTICES.md`}>terms</a
+          >.
+        </p>
+        <p class="built">
+          Release data from <a href={`${REPOSITORY_URL}/tree/${sourceCommit}`}
+            ><code>{sourceCommit.slice(0, 7)}</code></a
+          >.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style>
+  .skip {
+    position: absolute;
+    left: var(--s-4);
+    top: var(--s-4);
+    z-index: 10;
+    padding: var(--s-2) var(--s-4);
+    border-radius: var(--radius);
+    background: var(--signal);
+    color: var(--on-signal);
+    font-weight: 650;
+    text-decoration: none;
+    translate: 0 -200%;
+    transition: translate 150ms var(--ease-out);
+  }
+
+  .skip:focus-visible {
+    translate: 0 0;
+  }
+
+  .masthead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-5);
+    padding-block: var(--s-5);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    text-decoration: none;
+  }
+
+  .wordmark {
+    font-size: 1.3125rem;
+    font-weight: 800;
+    font-stretch: 125%;
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+
+  nav ul {
+    display: flex;
+    align-items: center;
+    gap: clamp(var(--s-4), 3vw, var(--s-6));
+    padding: 0;
+    list-style: none;
+    font-size: 0.9375rem;
+    font-weight: 560;
+  }
+
+  nav a {
+    text-decoration-color: transparent;
+    padding-block: var(--s-2);
+  }
+
+  nav a:hover {
+    text-decoration-color: var(--signal);
+  }
+
+  .github {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+  }
+
+  @media (max-width: 30rem) {
+    .github span {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+  }
+
+  .colophon {
+    border-top: 1px solid var(--rule);
+    padding-block: var(--s-7) var(--s-8);
+    color: var(--ink-3);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+
+  .colophon .wrap {
+    display: grid;
+    gap: var(--s-2);
+  }
+
+  .colophon p {
+    max-width: var(--measure);
+  }
+</style>

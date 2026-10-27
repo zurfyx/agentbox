@@ -1,0 +1,39 @@
+{
+  "version": "0.1.34",
+  "runtimeImage": "ghcr.io/zurfyx/agentbox-runtime@sha256:8f2470892b9b5cf78c1f80f2b6fe5539e970de3bba01348489345984090cfb8b",
+  "sourceCommit": "9be4bc06da77d402557ee99818aa22ed6fccdbfa",
+  "claude": {
+    "version": "2.1.295",
+    "platforms": [
+      {
+        "platform": "linux/arm64",
+        "size": 255516664,
+        "sha256": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.295/linux-arm64/claude"
+      },
+      {
+        "platform": "linux/amd64",
+        "size": 256113848,
+        "sha256": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.295/linux-x64/claude"
+      }
+    ]
+  },
+  "codex": {
+    "version": "0.162.0",
+    "platforms": [
+      {
+        "platform": "linux/arm64",
+        "size": 153085319,
+        "sha256": "d47a5fa21e037a1b85729b88c238ff3da8a956fc9fb5ad3976714428e7fb2bda",
+        "url": "https://releases.openai.com/codex/releases/0.162.0/codex-package-aarch64-unknown-linux-musl.tar.gz"
+      },
+      {
+        "platform": "linux/amd64",
+        "size": 162956804,
+        "sha256": "4f573944c1d2059109d75a2f4d0cc9c03697288224a5e407717a9de98fc010c5",
+        "url": "https://releases.openai.com/codex/releases/0.162.0/codex-package-x86_64-unknown-linux-musl.tar.gz"
+      }
+    ]
+  }
+}

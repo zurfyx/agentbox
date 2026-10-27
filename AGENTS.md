@@ -10,5 +10,6 @@
   published versions, URLs, and checksums.
 - Use `scripts/dev.sh` for agent launches from a checkout. Never add vendor
   executables to the repository, runtime image, or release archive.
-- Keep public behavior, docs, completions, packaging, and deterministic tests in
-  sync. Run `npm run check` before handing off a change.
+- Keep public behavior, docs, completions, packaging, the website in `site/`,
+  and deterministic tests in sync. Run `npm run check` before handing off a
+  change.
