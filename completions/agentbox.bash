@@ -35,7 +35,7 @@ _agentbox_complete() {
   done
 
   if ((index == COMP_CWORD)); then
-    _agentbox_add_matches "$current" claude clauded codex
+    _agentbox_add_matches "$current" claude clauded codex codexd
     ((seen_no_update == 0)) && _agentbox_add_matches "$current" --no-update
     ((seen_workspace_only == 0)) && _agentbox_add_matches "$current" --workspace-only
     if ((index == 1)); then
@@ -48,7 +48,7 @@ _agentbox_complete() {
   fi
 
   first=${COMP_WORDS[index]}
-  [[ $first == claude || $first == clauded || $first == codex || $first == -- ]] && return 0
+  [[ $first == claude || $first == clauded || $first == codex || $first == codexd || $first == -- ]] && return 0
   if ((index != 1)); then
     case "$first" in
       setup | update | rollback | doctor | info | help | -h | --help | --version) COMPREPLY=("") ;;

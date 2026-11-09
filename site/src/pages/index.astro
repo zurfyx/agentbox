@@ -80,8 +80,9 @@ const reach: Array<{ what: string; normal: Access; scoped: Access }> = [
 
 const commands = [
   { command: "agentbox claude", text: "Claude Code, also the default when you run agentbox alone. Extra arguments pass straight through." },
-  { command: "agentbox codex", text: "Codex, with its approvals and sandbox bypassed." },
   { command: "agentbox clauded", text: "Claude Code with permission prompts skipped." },
+  { command: "agentbox codex", text: "Codex, asking before it runs commands." },
+  { command: "agentbox codexd", text: "Codex with its approvals and sandbox bypassed." },
   { command: "agentbox --workspace-only …", text: "Mount only the current project for this session." },
   { command: "agentbox --no-update …", text: "Launch the release already selected, without preparing a newer one." },
   { command: "agentbox codex login --device-auth", text: "Sign Codex in with a device code. Browser callback login isn’t supported." },
@@ -194,7 +195,7 @@ const commands = [
         <p>
           Agentbox separates your agents’ identity and pins the bytes they run. In either mode an agent can still change or
           send anything it can see, use its credentials, and reach the network. <code>clauded</code> and
-          <code>codex</code> also skip the agents’ own prompts. Treat repositories, hooks, and tool output as able to
+          <code>codexd</code> also skip the agents’ own prompts. Treat repositories, hooks, and tool output as able to
           affect your Mac.
         </p>
         <p><ArrowLink href={`${docs}/security.md`}>Read the security model</ArrowLink></p>

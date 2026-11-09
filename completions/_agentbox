@@ -10,7 +10,8 @@ _agentbox() {
   root=(
     'claude:run Claude Code'
     'clauded:run Claude Code without permission prompts'
-    'codex:run Codex without approval prompts or its sandbox'
+    'codex:run Codex'
+    'codexd:run Codex without approval prompts or its sandbox'
     'setup:prepare the installed pinned release'
     'update:update the Agentbox Homebrew package'
     'rollback:select the immediately previous managed release'
@@ -26,7 +27,8 @@ _agentbox() {
   after_no_update=(
     'claude:run Claude Code'
     'clauded:run Claude Code without permission prompts'
-    'codex:run Codex without approval prompts or its sandbox'
+    'codex:run Codex'
+    'codexd:run Codex without approval prompts or its sandbox'
     '--workspace-only:limit host filesystem access to the current workspace'
     '--:pass all following arguments to Claude'
     'help:show Agentbox help'
@@ -37,7 +39,8 @@ _agentbox() {
   after_workspace_only=(
     'claude:run Claude Code'
     'clauded:run Claude Code without permission prompts'
-    'codex:run Codex without approval prompts or its sandbox'
+    'codex:run Codex'
+    'codexd:run Codex without approval prompts or its sandbox'
     '--no-update:skip lazy installed-release reconciliation'
     '--:pass all following arguments to Claude'
     'help:show Agentbox help'
@@ -48,7 +51,8 @@ _agentbox() {
   after_both=(
     'claude:run Claude Code'
     'clauded:run Claude Code without permission prompts'
-    'codex:run Codex without approval prompts or its sandbox'
+    'codex:run Codex'
+    'codexd:run Codex without approval prompts or its sandbox'
     '--:pass all following arguments to Claude'
     'help:show Agentbox help'
     '-h:show Agentbox help'
@@ -88,7 +92,7 @@ _agentbox() {
       first=$second
     fi
     case "$first" in
-      claude | clauded | codex | --) _files ;;
+      claude | clauded | codex | codexd | --) _files ;;
       setup | update | rollback | doctor | info | help | -h | --help | --version) ;;
       *) _files ;;
     esac
@@ -96,7 +100,7 @@ _agentbox() {
   fi
 
   case "$first" in
-    claude | clauded | codex | --)
+    claude | clauded | codex | codexd | --)
       _files
       ;;
     doctor | info)

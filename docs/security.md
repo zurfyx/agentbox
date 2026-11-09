@@ -13,11 +13,13 @@ network access. It does not protect against network exfiltration, reachable
 host services, Docker Desktop or daemon compromise, destructive workspace
 changes, persistent vendor-state compromise, or races with the same host user.
 
-`clauded` skips Claude permission prompts. Codex runs with approvals and its
-sandbox bypassed. Treat prompts, repositories, hooks, MCP servers, and tool
-output as potentially host-affecting. Keep secrets out of repositories, review
-destructive commands, and do not present Agentbox as a boundary against
-malicious agent code or the same host account.
+`clauded` skips Claude permission prompts. `codexd` runs Codex with approvals
+and its sandbox bypassed. Plain `codex` keeps Codex's approval prompts, but
+Codex's own sandbox cannot start inside the container, so approved commands run
+with the container's full authority. Treat prompts, repositories, hooks, MCP
+servers, and tool output as potentially host-affecting. Keep secrets out of
+repositories, review destructive commands, and do not present Agentbox as a
+boundary against malicious agent code or the same host account.
 
 Digest verification and read-only managed mounts protect release selection
 from accidents; they do not reduce the deliberate authority granted to a normal

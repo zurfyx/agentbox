@@ -65,7 +65,7 @@ test("workspace-only documentation states the exact grammar and remaining author
 
   assert.match(
     usage,
-    /agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\] \[--\] \[ARG \.\.\.\]/,
+    /agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\|codexd\] \[--\] \[ARG \.\.\.\]/,
   );
   assert.match(usage, /Each may appear at most once, and they may appear in either order/);
   assert.match(usage, /selector, `--`, or the first unknown[\s\S]*forwarded unchanged/);
@@ -104,7 +104,7 @@ test("workspace-only documentation states the exact grammar and remaining author
   const host = read("libexec/host.sh");
   assert.match(
     host,
-    /usage: agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\] \[--\] \[ARG \.\.\.\]/,
+    /usage: agentbox \[--workspace-only\] \[--no-update\] \[claude\|clauded\|codex\|codexd\] \[--\] \[ARG \.\.\.\]/,
   );
 
   const help = run(resolve(ROOT, "bin/agentbox"), ["--help"]);
@@ -429,7 +429,7 @@ test("completions are static data and preserve the global-prefix boundary", asyn
       assert.match(definition, new RegExp(metaAction.replace(/-/g, "\\-")), `${array}: ${metaAction}`);
     }
   }
-  assert.match(zshSource, /claude \| clauded \| codex \| --\) _files/);
+  assert.match(zshSource, /claude \| clauded \| codex \| codexd \| --\) _files/);
   assert.match(zshSource, /\*\) _files/);
 
   expectExit(run("bash", ["-n", "completions/agentbox.bash"]), 0, "Bash completion parse");
@@ -480,6 +480,7 @@ test("completions are static data and preserve the global-prefix boundary", asyn
       "claude",
       "clauded",
       "codex",
+      "codexd",
       "--",
       "help",
       "-h",

@@ -106,7 +106,7 @@ test("workspace flag prefix matrix preserves selectors and payload opacity", asy
     ["--workspace-only", "--no-update"],
     ["--no-update", "--workspace-only"],
   ]) {
-    for (const selector of ["", "claude", "clauded", "codex"]) {
+    for (const selector of ["", "claude", "clauded", "codex", "codexd"]) {
       const label = `${flags.join(" ")} ${selector || "default"}`;
       await t.test(label, () => {
         const engine = recordingEngine(
@@ -124,7 +124,7 @@ test("workspace flag prefix matrix preserves selectors and payload opacity", asy
           `agentbox ${label}`,
         );
         const argv = readNul(engine.argv);
-        const mode = selector || "claude";
+        const mode = { "": "claude", codex: "codex-normal", codexd: "codex" }[selector] ?? selector;
         assert.deepEqual(argv.slice(-payload.length), payload);
         assert.deepEqual(
           argv.slice(-runtimeTail(prepared, mode, payload).length),

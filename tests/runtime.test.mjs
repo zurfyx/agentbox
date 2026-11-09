@@ -160,13 +160,16 @@ test("runtime run preserves argv and applies mode policy", async (t) => {
   const dir = tempDir(t);
   const vendor = makeVendorTree(dir);
   const user = ["argument with spaces", "", "line one\nline two", "--literal"];
+  const claudeBypass = "--dangerously-skip-permissions";
+  const codexBypass = "--dangerously-bypass-approvals-and-sandbox";
   const cases = [
-    ["claude", []],
-    ["clauded", ["--dangerously-skip-permissions"]],
-    ["codex", ["--dangerously-bypass-approvals-and-sandbox"]],
+    ["claude", [], [claudeBypass, codexBypass]],
+    ["clauded", [claudeBypass], [codexBypass]],
+    ["codex", [codexBypass], [claudeBypass]],
+    ["codex-normal", ["check_for_update_on_startup=false"], [claudeBypass, codexBypass]],
   ];
 
-  for (const [mode, required] of cases) {
+  for (const [mode, required, forbidden] of cases) {
     await t.test(mode, () => {
       const record = resolve(dir, mode);
       const result = runtime(
@@ -185,6 +188,7 @@ test("runtime run preserves argv and applies mode policy", async (t) => {
       const argv = readNul(`${record}.argv`);
       assert.deepEqual(argv.slice(-user.length), user);
       for (const flag of required) assert.ok(argv.includes(flag), `${mode} lacks ${flag}`);
+      for (const flag of forbidden) assert.equal(argv.includes(flag), false, `${mode} has ${flag}`);
       const environment = readFileSync(`${record}.env`, "utf8");
       assert.match(environment, /^HOME=\/home\/node$/m);
       assert.match(environment, /^DISABLE_UPDATES=1$/m);
@@ -209,6 +213,8 @@ test("runtime rejects vendor updater and unsupported login before exec", (t) => 
     ["clauded", ["install"]],
     ["codex", ["remote-control"]],
     ["codex", ["login"]],
+    ["codex-normal", ["update"]],
+    ["codex-normal", ["login"]],
   ]) {
     const result = runtime(
       ["run", "--protocol", "1", "--mode", mode, "--release", AGENTBOX_VERSION, "--", ...args],
