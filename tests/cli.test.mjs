@@ -154,7 +154,8 @@ test("launch matrix constructs exact protocol and preserves argv", async (t) => 
     { input: ["claude", ...user], mode: "claude", forwarded: user },
     { input: ["--", ...user], mode: "claude", forwarded: user },
     { input: ["clauded", ...user], mode: "clauded", forwarded: user },
-    { input: ["codex", ...user], mode: "codex", forwarded: user },
+    { input: ["codex", ...user], mode: "codex-normal", forwarded: user },
+    { input: ["codexd", ...user], mode: "codex", forwarded: user },
   ];
 
   for (const entry of cases) {
@@ -199,10 +200,11 @@ test("launch matrix constructs exact protocol and preserves argv", async (t) => 
       assert.equal(argv.includes("-p"), false);
       assert.equal(argv.includes("github-secret-value"), false);
       assert.equal(argv.includes("openai-secret-value"), false);
-      assert.equal(argv.includes("OPENAI_API_KEY"), entry.mode === "codex");
+      const codex = entry.mode.startsWith("codex");
+      assert.equal(argv.includes("OPENAI_API_KEY"), codex);
       const engineEnvironment = readFileSync(engine.environment, "utf8");
       assert.equal(engineEnvironment.includes("github-secret-value"), true);
-      assert.equal(engineEnvironment.includes("openai-secret-value"), entry.mode === "codex");
+      assert.equal(engineEnvironment.includes("openai-secret-value"), codex);
       assert.equal(engineEnvironment.includes("AGENTBOX_TEST_"), false);
     });
   }
@@ -438,20 +440,33 @@ cat > '${stdinRecord}'
   assert.equal(readFileSync(stdinRecord, "utf8"), "stdin-sentinel\n");
 });
 
-test("Codex callback login is rejected before engine access", (t) => {
+test("Codex callback login is rejected before engine access", async (t) => {
   const prepared = fixture(t);
-  const engine = recordingEngine(prepared.dir);
-  const rejected = cli(["codex", "login"], prepared, engine.path);
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /device-auth|API.?key/i);
-  assert.equal(existsSync(engine.argv), false);
+  let serial = 0;
+  for (const [selector, mode] of [["codex", "codex-normal"], ["codexd", "codex"]]) {
+    await t.test(selector, () => {
+      const engine = recordingEngine(prepared.dir, 0, `login-${serial++}`);
+      const rejected = cli([selector, "login"], prepared, engine.path);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /device-auth|API.?key/i);
+      assert.equal(existsSync(engine.argv), false);
 
-  const acceptedEngine = recordingEngine(prepared.dir, 41);
-  expectExit(
-    cli(["codex", "login", "--device-auth"], prepared, acceptedEngine.path),
-    41,
-    "device auth dispatch",
-  );
+      const updater = recordingEngine(prepared.dir, 0, `update-${serial++}`);
+      const update = cli([selector, "update"], prepared, updater.path);
+      assert.equal(update.status, 64);
+      assert.match(update.stderr, /vendor self-update\/daemon commands are disabled/);
+      assert.equal(existsSync(updater.argv), false);
+
+      const acceptedEngine = recordingEngine(prepared.dir, 41, `accepted-${serial++}`);
+      expectExit(
+        cli([selector, "login", "--device-auth"], prepared, acceptedEngine.path),
+        41,
+        `${selector} device auth dispatch`,
+      );
+      const argv = readNul(acceptedEngine.argv);
+      assert.equal(argv[argv.indexOf("--mode") + 1], mode);
+    });
+  }
 });
 
 test("explicit development setup uses an isolated local image without pulling", (t) => {

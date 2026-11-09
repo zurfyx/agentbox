@@ -186,12 +186,13 @@ runtime_root() {
 
 usage() {
   cat << 'EOF'
-usage: agentbox [--workspace-only] [--no-update] [claude|clauded|codex] [--] [ARG ...]
+usage: agentbox [--workspace-only] [--no-update] [claude|clauded|codex|codexd] [--] [ARG ...]
        agentbox setup [--reset-selector] | update | rollback --accept-vendor-state-risk
        agentbox doctor [--json] | info [--json]
 
-Claude is the default. `clauded` disables Claude permission prompts; Codex
-uses its approvals/sandbox bypass mode. Codex browser login is unsupported;
+Claude is the default. `clauded` disables Claude permission prompts; `codexd`
+runs Codex in its approvals/sandbox bypass mode. Plain `codex` keeps Codex's
+approval prompts. Codex browser login is unsupported;
 use `agentbox codex login --device-auth` or OPENAI_API_KEY.
 
 --workspace-only mounts the canonical Git worktree (plus required linked
@@ -234,7 +235,7 @@ reject_vendor_update() {
   local mode="$1"
   shift
   case "$mode:${1:-}:${2:-}" in
-    claude:install:* | claude:update:* | claude:upgrade:* | clauded:install:* | clauded:update:* | clauded:upgrade:* | codex:update:* | codex:remote-control:* | codex:agents:* | codex:app-server:daemon)
+    claude:install:* | claude:update:* | claude:upgrade:* | codex:update:* | codex:remote-control:* | codex:agents:* | codex:app-server:daemon)
       printf 'agentbox: vendor self-update/daemon commands are disabled; use `agentbox update` for the managed release\n' >&2
       return 64
       ;;
@@ -366,14 +367,29 @@ rollback_command() {
 }
 
 launch_agent() {
-  local mode="$1" no_update="$2" workspace_only="$3"
+  local selector="$1" no_update="$2" workspace_only="$3" mode runtime_mode
   shift 3
+  # `mode` is the vendor; `runtime_mode` is the protocol-1 runtime launch mode.
+  # Runtime mode `codex` has always meant Codex with its approvals and sandbox
+  # bypassed, so `codexd` keeps it and still runs on an older runtime image
+  # selected through rollback or --no-update. Normal Codex uses a newer runtime
+  # mode that older images reject, so it fails closed instead of running with
+  # the bypass.
+  case "$selector" in
+    claude) mode=claude runtime_mode=claude ;;
+    clauded) mode=claude runtime_mode=clauded ;;
+    codex) mode=codex runtime_mode=codex-normal ;;
+    codexd) mode=codex runtime_mode=codex ;;
+    *)
+      printf 'agentbox: unknown agent selector %q\n' "$selector" >&2
+      return 64
+      ;;
+  esac
   reject_browser_login "$mode" "$@" || return
   reject_vendor_update "$mode" "$@" || return
   local manifest="" engine python home root physical_root release image plan plan_fields cwd="" gh_token="" user_name state gh
   local workspace="" workspace_fields="" workspace_root="" workspace_metadata=""
   local requested_agent="$mode" prior_release="" after_state="" after_release="" prepare_status=0 reconciliation_failed=0
-  [[ $requested_agent == clauded ]] && requested_agent=claude
   python="$(resolve_python)" || return
   home="$(account_home)" || return
   root="$(runtime_root "$home")"
@@ -496,7 +512,7 @@ launch_agent() {
     docker_args+=(-w "$cwd" -e GH_TOKEN -e "AGENTBOX_HOST=${AGENTBOX_HOST:-host.docker.internal}" -e "AGENTBOX_HOST_USER=${AGENTBOX_HOST_USER:-$user_name}")
   fi
   [[ $mode == codex && -n ${OPENAI_API_KEY:-} ]] && docker_args+=(-e OPENAI_API_KEY)
-  docker_args+=("$image" run --protocol 1 --mode "$mode" --release "$(basename "$release")" -- "$@")
+  docker_args+=("$image" run --protocol 1 --mode "$runtime_mode" --release "$(basename "$release")" -- "$@")
   local -a state_command=(exec-engine -- "$engine" "${docker_args[@]}")
   [[ $mode == codex && (${1:-} == login || ${1:-} == logout) ]] && state_command=(exec-locked --root "$root" -- "$engine" "${docker_args[@]}")
   if [[ $workspace_only == 1 ]]; then
@@ -619,7 +635,7 @@ main() {
       doctor_command "${1:-}"
       return
       ;;
-    claude | clauded | codex)
+    claude | clauded | codex | codexd)
       mode="$1"
       shift
       [[ ${1:-} == -- ]] && shift

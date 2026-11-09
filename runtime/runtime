@@ -501,12 +501,16 @@ def command_validate(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def vendor(mode: str) -> str:
+    return "claude" if mode in {"claude", "clauded"} else "codex"
+
+
 def first_command(mode: str, argv: list[str]) -> tuple[str | None, int]:
     if not argv:
         return None, -1
     # Vendor subcommands are the first non-option token.  `--` explicitly ends
     # option parsing; options whose values are vendor-specific remain opaque.
-    policy_mode = "claude" if mode == "clauded" else mode
+    policy_mode = vendor(mode)
     value_options = {
         "claude": {
             "--add-dir", "--agent", "--agents", "--append-system-prompt", "--append-system-prompt-file",
@@ -544,9 +548,9 @@ def refuse_update(release: str) -> "None":
 
 def check_policy(mode: str, argv: list[str], release: str) -> None:
     command, index = first_command(mode, argv)
-    if mode in {"claude", "clauded"} and command in {"install", "update", "upgrade"}:
+    if vendor(mode) == "claude" and command in {"install", "update", "upgrade"}:
         refuse_update(release)
-    if mode != "codex" or command is None:
+    if vendor(mode) != "codex" or command is None:
         return
     if command in {"update", "remote-control", "agents"}:
         refuse_update(release)
@@ -590,7 +594,7 @@ def command_run(args: argparse.Namespace) -> int:
         env.pop(name, None)
     env["PATH"] = f"{root}/codex/bin:{root}/claude:{root}/codex/codex-path:/usr/local/bin:/usr/bin:/bin"
 
-    if args.mode in {"claude", "clauded"}:
+    if vendor(args.mode) == "claude":
         env.pop("OPENAI_API_KEY", None)
         executable = root / "claude" / "claude"
         command = [str(executable), "--settings", str(share / "claude-settings.json"), "--append-system-prompt-file", str(share / "instructions.md")]
@@ -605,8 +609,11 @@ def command_run(args: argparse.Namespace) -> int:
             "check_for_update_on_startup=false",
             "-c",
             "developer_instructions=" + json.dumps(instructions, ensure_ascii=False),
-            "--dangerously-bypass-approvals-and-sandbox",
         ]
+        # Protocol 1 fixed `codex` as the bypass mode (`agentbox codexd`);
+        # `codex-normal` (`agentbox codex`) keeps Codex's own approval defaults.
+        if args.mode == "codex":
+            command.append("--dangerously-bypass-approvals-and-sandbox")
     ensure_plain_file(executable, "selected vendor executable")
     os.execvpe(str(executable), command + vendor_args, env)
     return 127
@@ -629,7 +636,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--candidate", required=True)
     run = commands.add_parser("run")
     run.add_argument("--protocol", type=int, required=True)
-    run.add_argument("--mode", required=True, choices=("claude", "clauded", "codex"))
+    run.add_argument("--mode", required=True, choices=("claude", "clauded", "codex", "codex-normal"))
     run.add_argument("--release", required=True)
     run.add_argument("vendor_args", nargs=argparse.REMAINDER)
     return result

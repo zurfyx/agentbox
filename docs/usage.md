@@ -9,14 +9,15 @@ completions; Agentbox does not edit shell startup files.
 Run Agentbox from the directory you want the agent to work in:
 
 ```sh
-agentbox [--workspace-only] [--no-update] [claude|clauded|codex] [--] [ARG ...]
+agentbox [--workspace-only] [--no-update] [claude|clauded|codex|codexd] [--] [ARG ...]
 
 agentbox                         # Claude Code (default)
 agentbox "fix the flaky test"    # arguments pass through unchanged
 agentbox --resume               # unknown root flags belong to Claude
 agentbox claude --resume        # explicit Claude selector
 agentbox clauded --resume       # Claude with --dangerously-skip-permissions
-agentbox codex                  # Codex with approvals and sandbox bypassed
+agentbox codex                  # Codex with its own approval prompts
+agentbox codexd                 # Codex with approvals and sandbox bypassed
 agentbox -- setup               # pass reserved word "setup" to Claude
 agentbox --no-update claude     # use an already selected compatible release
 agentbox --workspace-only       # workspace-limited default Claude launch
@@ -25,8 +26,18 @@ agentbox --workspace-only codex # workspace-limited Codex launch
 
 On first launch, Agentbox downloads, verifies, and validates only the requested
 vendor. `clauded` prepares the Claude artifact but remains a distinct launch
-mode. Launching the other vendor later adds it to a new immutable prepared
-snapshot while retaining verified artifacts and user-owned state.
+mode, and `codexd` likewise prepares the Codex artifact. Launching the other
+vendor later adds it to a new immutable prepared snapshot while retaining
+verified artifacts and user-owned state.
+
+Plain `codex` launches Codex with its own approval defaults, the counterpart of
+`claude`. Codex's Linux sandbox cannot create the user namespaces it needs
+inside the Agentbox container, so commands it would sandbox fail there and Codex
+asks before retrying them unsandboxed. Use `codexd` for the previous `codex`
+behavior. A selected managed release from before `codexd` existed (after
+`agentbox rollback`, or with `--no-update` before an upgrade is prepared)
+refuses plain `codex` rather than running it with the bypass; `codexd` still
+works there.
 
 `--workspace-only` and `--no-update` are Agentbox options only in the leading
 prefix. Each may appear at most once, and they may appear in either order.
@@ -34,7 +45,7 @@ Agentbox stops parsing that prefix at a selector, `--`, or the first unknown
 argument (which starts the default Claude payload). Everything from that point
 is forwarded unchanged, so `agentbox codex --workspace-only` passes the flag to
 Codex instead of enabling the Agentbox mode. Global Agentbox flags do not apply
-to lifecycle commands. `clauded` and `codex` are intentionally dangerous
+to lifecycle commands. `clauded` and `codexd` are intentionally dangerous
 shortcuts: Agentbox adds the vendor's permission or sandbox bypass flag before
 the arguments you supply. Review the [security model](security.md) before using
 them.
