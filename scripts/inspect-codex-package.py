@@ -37,6 +37,11 @@ METADATA_KEYS = {
     "variant",
     "version",
 }
+# Keys a newer Codex package may declare, with the only value accepted for each.
+# Codex releases after 0.165.0 declare execServer; the file must ship in the archive.
+OPTIONAL_METADATA = {
+    "execServer": "bin/codex-exec-server",
+}
 
 
 class InspectionError(Exception):
@@ -146,7 +151,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         metadata = json.loads(metadata_bytes, object_pairs_hook=unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"codex-package.json is invalid JSON: {error}")
-    if not isinstance(metadata, dict) or set(metadata) != METADATA_KEYS:
+    if not isinstance(metadata, dict) or not METADATA_KEYS <= set(metadata) <= METADATA_KEYS | set(OPTIONAL_METADATA):
         fail("codex-package.json has an unexpected schema")
     expected_metadata = {
         "layoutVersion": 1,
@@ -157,6 +162,11 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
+    for key, value in OPTIONAL_METADATA.items():
+        if key in metadata:
+            if value not in seen:
+                fail(f"codex-package.json declares {key} but the archive lacks {value!r}")
+            expected_metadata[key] = value
     if metadata != expected_metadata:
         fail("codex-package.json does not match the requested version and target")
     return {

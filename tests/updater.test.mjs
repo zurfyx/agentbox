@@ -118,6 +118,52 @@ test("safe package inspector discovers canonical package layout evolution", (t) 
   assert.match(rejected.stderr, /outside approved roots/);
 });
 
+test("safe package inspector accepts a declared Codex exec server", (t) => {
+  const dir = tempDir(t);
+  const metadata = JSON.stringify({
+    ...JSON.parse(METADATA),
+    execServer: "bin/codex-exec-server",
+  });
+  const base = CODEX_MEMBERS.map((name) => ({
+    name,
+    data: name === "codex-package.json" ? metadata : "fixture",
+    type: name.endsWith("/") ? "dir" : "file",
+  }));
+  const withServer = [...base, { name: "bin/codex-exec-server", data: "server" }];
+  const accepted = inspect(makeArchive(dir, withServer));
+  expectExit(accepted, 0, "exec server metadata");
+  assert.ok(JSON.parse(accepted.stdout).allowed_members.includes("bin/codex-exec-server"));
+
+  const missing = inspect(makeArchive(dir, base, "missing.tar.gz"));
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /declares execServer/);
+
+  const moved = JSON.stringify({ ...JSON.parse(metadata), execServer: "bin/other" });
+  const wrongPath = inspect(
+    makeArchive(
+      dir,
+      withServer.map((item) =>
+        item.name === "codex-package.json" ? { ...item, data: moved } : item,
+      ),
+      "moved.tar.gz",
+    ),
+  );
+  assert.notEqual(wrongPath.status, 0);
+
+  const unknown = JSON.stringify({ ...JSON.parse(metadata), surprise: true });
+  const extraKey = inspect(
+    makeArchive(
+      dir,
+      withServer.map((item) =>
+        item.name === "codex-package.json" ? { ...item, data: unknown } : item,
+      ),
+      "unknown.tar.gz",
+    ),
+  );
+  assert.notEqual(extraKey.status, 0);
+  assert.match(extraKey.stderr, /unexpected schema/);
+});
+
 test("safe package inspector rejects links, devices, FIFOs, and duplicates", async (t) => {
   const badTypes = ["symlink", "hardlink", "device", "fifo"];
   for (const type of badTypes) {
