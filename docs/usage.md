@@ -217,5 +217,14 @@ revocation, and macOS privacy implications.
   startup file, start a new shell (or unset the function), and retry the
   installed executable. Agentbox no longer has a manual shell installer and
   does not modify `.zshrc`.
+- If every prompt is rejected with `UserPromptSubmit operation blocked by
+  hook` and a `No such file or directory` under `/home/node`, a Claude hook
+  points at a script that exists only on the host. Inside the container,
+  `$HOME` is `/home/node` (`~/.agentbox` on the host), so a hook such as
+  `python3 "$HOME/.agents/hooks/example.py"` that another Mac app installed
+  resolves to a missing file, and the non-zero exit blocks the prompt. Find
+  it with `grep -rn hooks ~/.agentbox/.claude/settings.json .claude/`, then
+  remove that hook entry or copy the script to the same path under
+  `~/.agentbox`.
 - Use `agentbox doctor` for read-only integrity and Docker engine diagnostics.
   Use `agentbox info --json` to inspect the installed and selected release.
