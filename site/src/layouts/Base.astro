@@ -1,5 +1,6 @@
 ---
 import { Font } from "astro:assets";
+import Analytics from "@vercel/analytics/astro";
 import "../styles/global.css";
 import Logo from "../components/Logo.astro";
 import { REPOSITORY_URL } from "../lib/release";
@@ -51,6 +52,8 @@ const docs = `${REPOSITORY_URL}/blob/main/docs`;
         document.documentElement.dataset.motion = "ok";
       }
     </script>
+
+    <Analytics />
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
