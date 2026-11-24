@@ -95,20 +95,20 @@
       "platforms": [
         {
           "platform": "linux/arm64",
-          "sha256": "d8c43bee6cf11b01eb18b95f4d7961092bc40228180808859e70dabb7784c1c9",
-          "size": 199315347,
+          "sha256": "faf17b8071927f33346a805dc8cb45de4e08c0d75cf0e5e68cecddca28b8861e",
+          "size": 201917755,
           "target": "aarch64-unknown-linux-musl",
-          "url": "https://releases.openai.com/codex/releases/0.171.0/codex-package-aarch64-unknown-linux-musl.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.172.0/codex-package-aarch64-unknown-linux-musl.tar.gz"
         },
         {
           "platform": "linux/amd64",
-          "sha256": "8391d67757496bfd14893eca6cbf0c96994bf2627566ff1f018f70600c9ef6b3",
-          "size": 197763180,
+          "sha256": "63e3b00065ed7f62166d0522e17f663cb866a31d80d03e63365482ed34a1d991",
+          "size": 200434347,
           "target": "x86_64-unknown-linux-musl",
-          "url": "https://releases.openai.com/codex/releases/0.171.0/codex-package-x86_64-unknown-linux-musl.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.172.0/codex-package-x86_64-unknown-linux-musl.tar.gz"
         }
       ],
-      "version": "0.171.0"
+      "version": "0.172.0"
     }
   }
 }
